@@ -1,6 +1,6 @@
 # WorkBuddy 一键备份
 
-[![下载最新版本](https://img.shields.io/badge/下载-v1.0.0-blue)](https://github.com/mango6i/WorkBuddyBackup/releases/download/v1.0.0/WorkBuddyBackup.exe)
+[![下载最新版本](https://img.shields.io/badge/下载-v1.1.0-blue)](https://github.com/mango6i/WorkBuddyBackup/releases/download/v1.1.0/WorkBuddyBackup.exe)
 
 **一句话说明**：把你在 WorkBuddy 里的**所有对话**和**写过的项目代码**打包成一个压缩文件，换电脑或重装系统后，再一键装回去 —— 就像给 WorkBuddy 做一次"整机搬家"。
 
@@ -25,7 +25,7 @@
 
 ## 二、下载与运行
 
-1. 点上面蓝色按钮，或打开：[最新版本下载](https://github.com/mango6i/WorkBuddyBackup/releases/download/v1.0.0/WorkBuddyBackup.exe)
+1. 点上面蓝色按钮，或打开：[最新版本下载](https://github.com/mango6i/WorkBuddyBackup/releases/download/v1.1.0/WorkBuddyBackup.exe)
 2. 双击 `WorkBuddyBackup.exe` 即可运行 —— **不用安装、不用装 Python**
 3. 首次启动会自动找好 WorkBuddy 的数据位置，直接就能用
 4. 关闭时点右上角 `×`，可选「退出程序」或「最小化到托盘」
@@ -72,7 +72,14 @@
 
 **第 4 步**：勾选要恢复的对话 → 点「**恢复所选对话**」→ 完成后**重启 WorkBuddy**。
 
-恢复时会自动做三件事：把旧电脑的路径改写成新电脑的路径、自动备份当前数据为 `.bak` 文件（出错可回滚）、把对话/自动化任务/空间登记一次性写回。
+恢复时会自动做四件事：
+
+1. **整库合并**：对话、自动化任务、空间登记、对话快照等全部数据表一次性写回（不是只写对话）；
+2. **账号归属对齐**：把恢复的数据挂到当前登录账号名下（`user_id` 改写），确保 WorkBuddy 界面能显示出来 —— 这是换电脑后"看不到恢复内容"的常见原因，本工具已自动处理；
+3. **路径改写**：旧用户名、旧工作区目录自动改写成新电脑路径；
+4. **安全兜底**：恢复前自动把当前数据库备份为 `.bak` 文件，出错可回滚。
+
+> 恢复前请**先启动并登录 WorkBuddy**（让本机生成账号信息），然后关闭它再恢复 —— 这样账号归属对齐最准确。
 
 ---
 
