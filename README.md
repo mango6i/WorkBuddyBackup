@@ -76,11 +76,11 @@
 
 ---
 
-## 五、设置（右上角 ⚙️）用大白话解释
+## 五、设置项说明（右上角 ⚙️）
 
 ![设置页](screenshots/03-settings.png?v=3)
 
-| 选项 | 说人话 |
+| 选项 | 说明 |
 |------|--------|
 | 备份保存位置 | 备份包存哪儿，默认 D 盘的「WorkBuddy备份」文件夹 |
 | WorkBuddy 数据目录 | 对话记录存在哪儿，**一般不用改**，软件已自动检测好 |
@@ -126,3 +126,54 @@ A：取决于你勾选的对话和代码量。排除了缓存和依赖目录后�
 
 Python 3 + PyQt6 开发，PyInstaller 单文件打包（含启动画面与自定义图标）。
 数据库采用 SQLite 全表合并策略，恢复时逐表 `INSERT OR REPLACE`，保证自动化任务、空间登记、对话快照一并还原；备份前执行 `wal_checkpoint` 确保包含最新数据。
+
+---
+
+## 📁 项目结构（本项目已开源）
+
+```
+WorkBuddyBackup/
+├── WorkBuddyBackup.exe        # 成品，下载即用
+├── src/
+│   └── WorkBuddy一键备份.py   # 全部源码（单文件）
+├── tools/
+│   ├── make_icon.py           # 生成程序图标 .ico
+│   └── make_splash.py         # 生成启动画面
+├── WorkBuddyBackup.spec       # PyInstaller 打包配置
+├── WorkBuddyBackup.ico        # 程序图标
+├── splash.png                 # 启动画面
+├── screenshots/               # 界面截图
+├── requirements.txt           # 依赖清单
+├── LICENSE                    # 开源协议（MIT + 转载署名条款）
+└── README.md
+```
+
+---
+
+## 🔨 从源码自行打包
+
+```bash
+# 1. 安装依赖（Python 3.10+）
+pip install -r requirements.txt
+
+# 2. 生成图标与启动画面（可选，仓库已带成品）
+python tools/make_icon.py
+python tools/make_splash.py
+
+# 3. 打包单文件 exe
+pip install pyinstaller
+pyinstaller WorkBuddyBackup.spec --noconfirm
+# 产物在 dist/WorkBuddyBackup.exe
+```
+
+---
+
+## 📜 开源协议与转载说明
+
+本项目基于 **MIT 协议**开源，附加以下条款：
+
+1. **转载 / 二次分发必须注明原始出处**：
+   `https://github.com/mango6i/WorkBuddyBackup`
+2. 修改版必须标注「基于 WorkBuddyBackup 修改」，不得冒充原版；
+3. 不得移除或篡改 LICENSE 文件及源码中的版权声明；
+4. 本工具仅操作本机文件，不含任何联网上传逻辑；使用产生的数据风险由使用者自行承担。
