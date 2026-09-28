@@ -1,8 +1,10 @@
 # WorkBuddy 一键备份
 
+[![下载最新版本](https://img.shields.io/badge/下载-v1.0.0-blue)](https://github.com/mango6i/WorkBuddyBackup/releases/download/v1.0.0/WorkBuddyBackup.exe)
+
 > Windows 桌面工具：把 WorkBuddy 的**对话记录**和**项目源代码**一键打包备份，换电脑后一键恢复，登录同一账号即可无缝继续使用。
 
-![主界面](screenshots/01-backup.png)
+![主界面](screenshots/01-backup.png?v=2)
 
 ## ✨ 核心能力
 
@@ -17,6 +19,8 @@
 ## 📦 下载与运行
 
 1. 下载 **`WorkBuddyBackup.exe`**（约 39 MB）
+   - 稳定版直链（推荐）：https://github.com/mango6i/WorkBuddyBackup/releases/download/v1.0.0/WorkBuddyBackup.exe
+   - 或仓库文件：`WorkBuddyBackup.exe` → 右上角 Download raw file
 2. 双击运行（Windows 若提示安全警告：选「更多信息 → 仍要运行」）
 3. 首次启动**自动检测** WorkBuddy 数据路径，无需手动配置
 4. 点右上角 `×` 可选择「退出程序 / 最小化到托盘」
@@ -27,7 +31,7 @@
 
 ## 🚀 使用方法一：备份（本机 → 备份包）
 
-![备份页](screenshots/01-backup.png)
+![备份页](screenshots/01-backup.png?v=2)
 
 1. 打开软件，默认进入「**备份**」页
 2. 列表自动列出本机对话，分组与官方侧边栏一致：
@@ -52,7 +56,7 @@
 
 ## 🚀 使用方法二：恢复（备份包 → 新电脑）
 
-![恢复页](screenshots/02-restore.png)
+![恢复页](screenshots/02-restore.png?v=2)
 
 1. 新电脑安装 WorkBuddy 并**登录同一账号**
 2. **完全退出 WorkBuddy**（托盘也要退出）
@@ -67,7 +71,7 @@
 
 ## ⚙️ 设置（点右上角 ⚙️）
 
-![设置页](screenshots/03-settings.png)
+![设置页](screenshots/03-settings.png?v=2)
 
 | 设置项              | 含义                                                        |
 | ---------------- | --------------------------------------------------------- |
