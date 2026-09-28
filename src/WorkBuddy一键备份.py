@@ -66,7 +66,10 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
+REPO_OWNER = "mango6i"
+REPO_NAME = "WorkBuddyBackup"
+PROJECT_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 
 # ─────────────────────────────────────────────
 # 配置文件路径
@@ -1875,13 +1878,14 @@ class BackupSettingsDialog(GradientDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 尺寸加大以保证内容完整显示；同时按屏幕可用高度自适应，小屏仍可滚动兜底
         scr = QApplication.primaryScreen().availableGeometry()
         width = 720
-        height = min(860, int(scr.height() * 0.9))
-        self.setFixedSize(width, height)
         self.cfg = load_backup_config()
         self.init_ui()
+        # 窗口高度按内容自适应：完整显示所有设置项，不留下方大块空白
+        h = self._content.sizeHint().height() + 130   # 标题栏 + 底部按钮行 + 边距
+        height = max(560, min(h, int(scr.height() * 0.92)))
+        self.setFixedSize(width, height)
 
     def init_ui(self):
         root = QVBoxLayout(self)
@@ -1935,9 +1939,27 @@ class BackupSettingsDialog(GradientDialog):
 
         content_widget = QWidget()
         content_widget.setStyleSheet("background: transparent;")
+        self._content = content_widget
         content = QVBoxLayout(content_widget)
         content.setContentsMargins(24, 6, 24, 10)
         content.setSpacing(7)
+
+        # ── 项目地址 + 检查更新 ──
+        info_row = QHBoxLayout()
+        info_row.setSpacing(8)
+        link = QLabel(f'<a href="{PROJECT_URL}" style="color:#1a6fd4; text-decoration:none;">'
+                      f'开源地址：{PROJECT_URL}</a>')
+        link.setOpenExternalLinks(True)
+        link.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        link.setStyleSheet("QLabel { font-size: 12px; background: transparent; }")
+        info_row.addWidget(link, 1)
+        self.check_btn = QPushButton("检查更新")
+        self.check_btn.setFixedHeight(30)
+        self.check_btn.setFixedWidth(88)
+        self.check_btn.setStyleSheet(self._btn_style(bg="rgba(255,255,255,180)", fg="#555"))
+        self.check_btn.clicked.connect(self.on_check_update)
+        info_row.addWidget(self.check_btn)
+        content.addLayout(info_row)
 
         # ── 自动检测结果（点「重新检测」自动刷新到这个框里）──
         content.addWidget(self._section_label("自动检测结果（点「重新检测」自动更新到这里）"))
@@ -1945,12 +1967,12 @@ class BackupSettingsDialog(GradientDialog):
         detect_row.setSpacing(8)
         self.detect_box = QTextEdit()
         self.detect_box.setReadOnly(True)
-        self.detect_box.setFixedHeight(58)
+        self.detect_box.setFixedHeight(92)
         self.detect_box.setStyleSheet(self._input_style() + " QTextEdit { font-size: 11px; }")
         self._fill_detect_box()
         detect_row.addWidget(self.detect_box, 1)
         detect_btn = QPushButton("重新检测")
-        detect_btn.setFixedHeight(58)
+        detect_btn.setFixedHeight(92)
         detect_btn.setFixedWidth(88)
         detect_btn.setStyleSheet(self._btn_style(bg="rgba(255,255,255,180)", fg="#555"))
         detect_btn.clicked.connect(self.on_redetect)
@@ -2029,7 +2051,7 @@ class BackupSettingsDialog(GradientDialog):
         # ── 源代码备份跳过目录 ──
         content.addWidget(self._section_label("备份源代码时跳过的文件夹（每行一个）"))
         self.excludes_edit = QTextEdit()
-        self.excludes_edit.setFixedHeight(52)
+        self.excludes_edit.setFixedHeight(104)
         self.excludes_edit.setStyleSheet(self._input_style())
         self.excludes_edit.setPlainText("\n".join(self.cfg.get("excludes", [])))
         content.addWidget(self.excludes_edit)
@@ -2075,6 +2097,34 @@ class BackupSettingsDialog(GradientDialog):
             f"源代码：{self.cfg.get('workspaces_root', '')}"
         )
 
+    def on_check_update(self):
+        """手动检查更新：请求 GitHub 最新 Release，与当前版本比较。"""
+        self.check_btn.setEnabled(False)
+        self.check_btn.setText("检查中…")
+        self._checker = UpdateChecker(silent=False)
+        self._checker.found.connect(self._on_update_found)
+        self._checker.notfound.connect(self._on_update_notfound)
+        self._checker.start()
+
+    def _on_update_found(self, info):
+        self.check_btn.setEnabled(True)
+        self.check_btn.setText("检查更新")
+        url = info.get('url') or PROJECT_URL
+        try:
+            from PyQt6.QtGui import QDesktopServices
+            from PyQt6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            pass
+        AppDialog.show_info(self, "发现新版本",
+                            f"最新版本：v{info.get('tag')}\n当前版本：v{APP_VERSION}\n\n"
+                            f"{info.get('name')}\n\n已为你打开下载页面。")
+
+    def _on_update_notfound(self, msg):
+        self.check_btn.setEnabled(True)
+        self.check_btn.setText("检查更新")
+        AppDialog.show_info(self, "检查更新", msg)
+
     def _section_label(self, text):
         lbl = QLabel(text)
         lbl.setStyleSheet("""
@@ -2111,7 +2161,7 @@ class BackupSettingsDialog(GradientDialog):
                 padding: 6px 0;
             }}
             QPushButton:hover {{
-                background-color: rgba(255,255,255,220);
+                border: 1px solid rgba(0,0,0,90);
             }}
         """
 
@@ -2261,7 +2311,7 @@ class TransparentMacWindow(QMainWindow):
         title_bar.setContentsMargins(24, 16, 20, 0)
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
-        title = QLabel("WorkBuddy 一键备份")
+        title = QLabel(f"WorkBuddy 一键备份 v{APP_VERSION}")
         title.setStyleSheet("""
             QLabel {
                 font-size: 17px;
@@ -2356,6 +2406,8 @@ class TransparentMacWindow(QMainWindow):
         self.switch_page(0)
         # 延迟加载数据：窗口先显示出来，避免启动时长时间空白
         QTimer.singleShot(60, self.load_local_sessions)
+        # 启动 2.5 秒后静默检查更新（有新版本才提示）
+        QTimer.singleShot(2500, lambda: self.check_for_update(silent=True))
 
         self.dragging = False
         self.drag_start = QPoint()
@@ -2575,8 +2627,7 @@ class TransparentMacWindow(QMainWindow):
             it.setText(0, f"📁 {text}")
         else:
             it.setText(0, text)
-        if tooltip:
-            it.setToolTip(0, tooltip)
+        # 不设置 tooltip：系统 tooltip 在深色主题下会弹黑色提示框，影响观感
         if checkable:
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             it.setCheckState(0, Qt.CheckState.Checked)
@@ -2601,9 +2652,7 @@ class TransparentMacWindow(QMainWindow):
         「任务 (N)」组（不属于任何登记空间的对话，含已删除过滤后）、「空间 (N)」组（下挂登记空间，空间内为对话）。"""
         tree.clear()
         task_root = self._make_group_node(tree, "任务", 'top', False)
-        task_root.setToolTip(0, "「任务」= 不属于任何空间的对话（与 WorkBuddy 侧边栏一致）")
         ws_root = self._make_group_node(tree, "空间", 'top', False)
-        ws_root.setToolTip(0, "「空间」= WorkBuddy 中打开过的项目空间（源代码按空间打包）")
         ws_groups = {}
         task_count = 0
         for r in rows:
@@ -2615,7 +2664,7 @@ class TransparentMacWindow(QMainWindow):
                 title = title[:30] + '…'
             it.setText(0, title)
             it.setText(1, self._fmt_time(r.get('updated_at')))
-            it.setToolTip(0, f"{r.get('title') or ''}\n{cwd}")
+            # 不设置 tooltip：系统 tooltip 在深色主题下会弹黑色提示框
             # 官方样式：时间紧跟对话名之后、灰色小字（左对齐，不贴最右）
             it.setForeground(1, QBrush(QColor(150, 155, 165)))
             f = it.font(1)
@@ -2822,6 +2871,32 @@ class TransparentMacWindow(QMainWindow):
         return w
 
     # ─────────── 数据加载 ───────────
+    def check_for_update(self, silent=True):
+        """检查 GitHub 最新 Release 是否比当前版本更高（静默模式下仅发现新版本才提示）。"""
+        try:
+            self._update_checker = UpdateChecker(silent=silent)
+            self._update_checker.found.connect(self._on_update_found)
+            if not silent:
+                self._update_checker.notfound.connect(
+                    lambda msg: AppDialog.show_info(self, "检查更新", msg))
+            self._update_checker.start()
+        except Exception as e:
+            logging.warning(f"检查更新失败: {e}")
+
+    def _on_update_found(self, info):
+        tag = info.get('tag', '')
+        url = info.get('url') or PROJECT_URL
+        try:
+            from PyQt6.QtGui import QDesktopServices
+            from PyQt6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(url))
+        except Exception:
+            pass
+        AppDialog.show_info(self, "发现新版本",
+                            f"发现新版本 v{tag}（当前 v{APP_VERSION}）。\n\n"
+                            f"{info.get('name')}\n\n"
+                            "已为你打开下载页面，下载后覆盖旧 exe 即可完成更新。")
+
     def load_local_sessions(self):
         try:
             rows = scan_local_sessions(self.engine.wb_dir)
@@ -3226,6 +3301,46 @@ def install_chinese_translator(app: QApplication):
             pass
     if not loaded:
         logging.warning("未能加载 Qt 中文翻译文件，颜色对话框可能显示英文")
+
+
+class UpdateChecker(QThread):
+    """后台检查 GitHub 最新 Release，与当前版本比较后发出信号。"""
+    found = pyqtSignal(dict)        # 发现新版本：{'tag','name','url'}
+    notfound = pyqtSignal(str)      # 已是最新 / 检查失败原因
+
+    def __init__(self, silent=True, parent=None):
+        super().__init__(parent)
+        self.silent = silent
+
+    def run(self):
+        try:
+            req = urllib.request.Request(
+                f'https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases/latest')
+            req.add_header('Accept', 'application/vnd.github+json')
+            req.add_header('User-Agent', 'WorkBuddyBackup-updater')
+            with urllib.request.urlopen(req, timeout=20) as r:
+                d = json.loads(r.read().decode())
+            tag = (d.get('tag_name') or '').lstrip('vV').strip()
+            try:
+                cur = tuple(int(x) for x in APP_VERSION.split('.'))
+                new = tuple(int(x) for x in tag.split('.')) if tag else cur
+            except ValueError:
+                new, cur = (), tuple(int(x) for x in APP_VERSION.split('.'))
+            if new > cur:
+                asset_url = ''
+                for a in d.get('assets', []):
+                    if str(a.get('name', '')).endswith('.exe'):
+                        asset_url = a.get('browser_download_url') or ''
+                        break
+                self.found.emit({
+                    'tag': tag,
+                    'name': d.get('name') or '',
+                    'url': asset_url or d.get('html_url') or PROJECT_URL,
+                })
+            else:
+                self.notfound.emit('当前已是最新版本。')
+        except Exception as e:
+            self.notfound.emit(f'检查失败（请检查网络）：{e}')
 
 
 def main():
