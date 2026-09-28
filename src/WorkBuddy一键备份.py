@@ -637,6 +637,67 @@ class BackupEngine:
                             progress.emit("count", len(items), 0)
         return items
 
+    def _current_user_id(self, db_path):
+        """读取数据库里当前登录账号的 user_id（WorkBuddy 界面按此字段过滤显示）。"""
+        try:
+            if not os.path.exists(db_path):
+                return ''
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            uid = ''
+            try:
+                row = cur.execute(
+                    "SELECT user_id FROM sessions "
+                    "WHERE user_id IS NOT NULL AND user_id != '' LIMIT 1").fetchone()
+                if row and row[0]:
+                    uid = str(row[0])
+                else:
+                    row = cur.execute(
+                        "SELECT owner_user_id FROM automations "
+                        "WHERE owner_user_id IS NOT NULL AND owner_user_id != '' LIMIT 1").fetchone()
+                    if row and row[0]:
+                        uid = str(row[0])
+            except sqlite3.Error:
+                pass
+            conn.close()
+            return uid
+        except Exception as e:
+            logging.warning(f"读取账号 user_id 失败: {e}")
+            return ''
+
+    def _align_user_ids(self, db_path, target_user_id, progress=None):
+        """把恢复进来的对话 / 自动化任务统一归属到当前登录账号，
+        否则 WorkBuddy 界面会因 user_id 不匹配而过滤掉、看不到恢复的数据。"""
+        if not target_user_id:
+            return
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            n_s = n_a = 0
+            try:
+                cur.execute(
+                    "UPDATE sessions SET user_id = ? "
+                    "WHERE user_id IS NULL OR user_id != ?",
+                    (target_user_id, target_user_id))
+                n_s = cur.rowcount or 0
+            except sqlite3.Error:
+                pass
+            try:
+                cur.execute(
+                    "UPDATE automations SET owner_user_id = ? "
+                    "WHERE owner_user_id IS NULL OR owner_user_id != ?",
+                    (target_user_id, target_user_id))
+                n_a = cur.rowcount or 0
+            except sqlite3.Error:
+                pass
+            conn.commit()
+            conn.close()
+            if progress:
+                progress.emit(
+                    "log", f"账号归属对齐：对话 {n_s} 条、自动化 {n_a} 条 → 当前登录账号")
+        except Exception as e:
+            logging.warning(f"账号归属对齐失败: {e}")
+
     def _checkpoint_db(self):
         """备份前把 WAL 日志合并进主数据库文件，确保备份包含全部最新数据。"""
         try:
@@ -659,6 +720,7 @@ class BackupEngine:
             "version": APP_VERSION,
             "created_at": datetime.now().isoformat(),
             "source_user": os.environ.get("USERNAME") or os.environ.get("USER") or "unknown",
+            "source_user_id": self._current_user_id(os.path.join(self.wb_dir, 'workbuddy.db')),
             "source_wb_dir": self.wb_dir,
             "source_workspaces_root": self.ws_root,
             "item_count": total,
@@ -693,10 +755,12 @@ class BackupEngine:
                 zf.extractall(temp_dir)
             manifest_path = os.path.join(temp_dir, 'backup_manifest.json')
             old_user, old_wb, old_ws = current_user, self.wb_dir, self.ws_root
+            source_uid = ""
             if os.path.exists(manifest_path):
                 with open(manifest_path, 'r', encoding='utf-8') as f:
                     manifest = json.load(f)
                 old_user = manifest.get("source_user", current_user)
+                source_uid = manifest.get("source_user_id", "") or ""
                 old_wb = manifest.get("source_wb_dir", self.wb_dir)
                 old_ws = manifest.get("source_workspaces_root", self.ws_root)
                 if not selected_ids:
@@ -709,6 +773,7 @@ class BackupEngine:
             # 1) 合并对话索引（仅选中对话）
             src_db = os.path.join(temp_dir, '.workbuddy', 'workbuddy.db')
             dst_db = os.path.join(self.wb_dir, 'workbuddy.db')
+            local_uid = self._current_user_id(dst_db)   # 合并前先记录本机账号
             if os.path.exists(src_db):
                 if progress:
                     progress.emit("log", "正在合并对话索引 workbuddy.db ...")
@@ -716,6 +781,19 @@ class BackupEngine:
             else:
                 if progress:
                     progress.emit("log", "[警告] 备份包内未找到 workbuddy.db，跳过对话索引合并")
+
+            # 1.5) 账号归属对齐：把恢复的数据挂到当前登录账号名下，
+            #      否则 WorkBuddy 界面会因 user_id 不匹配而过滤掉、看不到恢复结果
+            target_uid = local_uid or source_uid
+            if target_uid:
+                if progress:
+                    progress.emit("log", "正在对齐账号归属（确保界面能显示）...")
+                self._align_user_ids(dst_db, target_uid, progress)
+            else:
+                if progress:
+                    progress.emit("log",
+                                  "[提示] 本机未检测到账号信息，请先启动并登录 WorkBuddy，"
+                                  "再关闭它执行恢复（同账号才能显示恢复的对话与自动化任务）")
 
             # 2) 复制选中对话正文
             src_sessions = os.path.join(temp_dir, '.workbuddy', 'sessions')
