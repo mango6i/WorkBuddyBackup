@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 构建产物
+build/
+dist/
+*.spec.bak
+
+# 运行时生成的文件（不要提交）
+WorkBuddyBackup_config.json
+WorkBuddyBackup_error.log
+*.bak.*
+
+# 系统文件
+Thumbs.db
+.DS_Store
