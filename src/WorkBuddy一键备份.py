@@ -35,12 +35,13 @@ from PyQt6.QtWidgets import (
     QScrollArea, QFrame, QGridLayout, QColorDialog, QFileDialog,
     QLineEdit, QTextEdit, QProgressBar, QCheckBox, QSpacerItem,
     QSizePolicy, QTreeWidget, QTreeWidgetItem, QStackedWidget,
-    QHeaderView, QAbstractItemView, QComboBox,
+    QHeaderView, QAbstractItemView, QComboBox, QMessageBox,
     QStyle, QStyleOptionViewItem
 )
 from PyQt6.QtGui import (
     QColor, QLinearGradient, QRadialGradient, QConicalGradient,
-    QBrush, QPainter, QPainterPath, QFont, QIcon, QPixmap
+    QBrush, QPainter, QPainterPath, QFont, QIcon, QPixmap,
+    QShortcut, QKeySequence
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QTranslator, QLibraryInfo, QLocale, QThread
 
@@ -1966,10 +1967,25 @@ class BackupSettingsDialog(GradientDialog):
         self.cfg = load_backup_config()
         self.init_ui()
         # 窗口高度按内容自适应：完整显示所有设置项，不留下方大块空白
-        # 130 = 标题栏 + 底部按钮行 + 路径提示行 + 边距
+        # 165 = 标题栏 + 底部按钮行 + 路径提示行 + 边距
         h = self._content.sizeHint().height() + 165
-        height = max(560, min(h, int(scr.height() * 0.92)))
+        max_h = max(520, scr.height() - 90)
+        height = max(520, min(h, max_h))
         self.setFixedSize(width, height)
+        self._center_on(scr)
+
+    def _center_on(self, scr):
+        """显式居中到父窗口（无父则屏幕），并限制在可用区域内，避免窗口跑到屏幕外。"""
+        try:
+            p = self.parent()
+            base = p.frameGeometry() if p is not None else scr
+            x = base.center().x() - self.width() // 2
+            y = base.center().y() - self.height() // 2
+            x = max(scr.left() + 8, min(x, scr.right() - self.width() - 8))
+            y = max(scr.top() + 8, min(y, scr.bottom() - self.height() - 8))
+            self.move(x, y)
+        except Exception as e:
+            LOG.warning(f"设置窗口定位失败: {e}")
 
     def init_ui(self):
         root = QVBoxLayout(self)
@@ -2070,53 +2086,28 @@ class BackupSettingsDialog(GradientDialog):
         self.detect_status.setVisible(True)   # 常驻占位，避免显示时布局跳动
         content.addWidget(self.detect_status)
 
-        # ── 备份保存位置 ──
-        content.addWidget(self._section_label("备份保存位置（备份包存到哪）"))
-        save_row = QHBoxLayout()
-        save_row.setSpacing(8)
+        # ── 路径设置（一张卡片容纳三个路径，层次更清晰）──
+        path_card = self._card()
+        pc = QVBoxLayout(path_card)
+        pc.setContentsMargins(14, 10, 14, 12)
+        pc.setSpacing(6)
+        pc.addWidget(self._section_label("路径设置"))
+
         self.save_edit = QLineEdit(self.cfg.get("save_root", "D:\\"))
-        self.save_edit.setStyleSheet(self._input_style())
-        save_btn = QPushButton("浏览")
-        save_btn.setFixedWidth(70)
-        save_btn.setStyleSheet(self._btn_style())
-        save_btn.clicked.connect(self.browse_save_root)
-        save_row.addWidget(self.save_edit)
-        save_row.addWidget(save_btn)
-        content.addLayout(save_row)
-        content.addWidget(self._hint_label(
-            "点「备份」后，备份包（zip，内含对话记录 + 源代码）自动存到这里，如 D:\\WorkBuddy备份\\。换电脑时把这个 zip 拷到新电脑即可。"))
+        pc.addWidget(self._path_row("备份保存位置", self.save_edit, self.browse_save_root))
+        pc.addWidget(self._hint_label(
+            "备份包（zip，内含对话记录 + 源代码）存到这里，如 D:\\WorkBuddy备份\\。换电脑时把 zip 拷到新电脑即可。"))
 
-        # ── WorkBuddy 数据目录 ──
-        content.addWidget(self._section_label("WorkBuddy 数据目录（对话记录、自动化任务存在哪）"))
-        wb_row = QHBoxLayout()
-        wb_row.setSpacing(8)
         self.wb_edit = QLineEdit(self.cfg.get("workbuddy_dir", os.path.expanduser("~\\.workbuddy")))
-        self.wb_edit.setStyleSheet(self._input_style())
-        wb_btn = QPushButton("浏览")
-        wb_btn.setFixedWidth(70)
-        wb_btn.setStyleSheet(self._btn_style())
-        wb_btn.clicked.connect(self.browse_wb_dir)
-        wb_row.addWidget(self.wb_edit)
-        wb_row.addWidget(wb_btn)
-        content.addLayout(wb_row)
-        content.addWidget(self._hint_label(
-            "WorkBuddy 的核心数据目录（默认 C:\\Users\\你\\.workbuddy），对话索引、自动化任务、设置都在这里，恢复时写回这里。一般不用改。"))
+        pc.addWidget(self._path_row("WorkBuddy 数据目录", self.wb_edit, self.browse_wb_dir))
+        pc.addWidget(self._hint_label(
+            "默认 C:\\Users\\你\\.workbuddy —— 对话索引、自动化任务、设置都在这里，恢复时写回这里。一般不用改。"))
 
-        # ── 项目工作空间根目录 ──
-        content.addWidget(self._section_label("项目工作空间根目录（源代码存在哪）"))
-        ws_row = QHBoxLayout()
-        ws_row.setSpacing(8)
         self.ws_edit = QLineEdit(self.cfg.get("workspaces_root", os.path.expanduser("~\\WorkBuddy")))
-        self.ws_edit.setStyleSheet(self._input_style())
-        ws_btn = QPushButton("浏览")
-        ws_btn.setFixedWidth(70)
-        ws_btn.setStyleSheet(self._btn_style())
-        ws_btn.clicked.connect(self.browse_ws_root)
-        ws_row.addWidget(self.ws_edit)
-        ws_row.addWidget(ws_btn)
-        content.addLayout(ws_row)
-        content.addWidget(self._hint_label(
-            "所有项目/任务的源代码都在这个目录下（默认 C:\\Users\\你\\WorkBuddy），备份时连同源代码一起打包。一般不用改。"))
+        pc.addWidget(self._path_row("项目工作空间", self.ws_edit, self.browse_ws_root))
+        pc.addWidget(self._hint_label(
+            "默认 C:\\Users\\你\\WorkBuddy —— 所有项目源代码都在这里，备份时一起打包。一般不用改。"))
+        content.addWidget(path_card)
 
         # ── 内置缓存排除（2×2 并排）──
         content.addWidget(self._section_label("WorkBuddy 内置缓存排除（可再生的缓存）"))
@@ -2182,6 +2173,40 @@ class BackupSettingsDialog(GradientDialog):
         path_hint.setWordWrap(True)
         root.addWidget(path_hint)
         strip_focus_rect(self)
+
+    @staticmethod
+    def _card():
+        """统一风格的白色分组卡片。"""
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255,255,255,140);
+                border-radius: 12px;
+                border: 1px solid rgba(255,255,255,175);
+            }
+        """)
+        return card
+
+    def _path_row(self, caption, edit, callback):
+        """路径设置行：左侧固定标签 + 输入框 + 浏览按钮。"""
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        cap = QLabel(caption)
+        cap.setFixedWidth(132)
+        cap.setStyleSheet(
+            "QLabel { color:#4b5563; font-size:12px; background:transparent; font-weight:600; }")
+        edit.setStyleSheet(self._input_style())
+        btn = QPushButton("浏览")
+        btn.setFixedWidth(68)
+        btn.setStyleSheet(self._btn_style())
+        btn.clicked.connect(callback)
+        lay.addWidget(cap)
+        lay.addWidget(edit, 1)
+        lay.addWidget(btn)
+        return w
 
     def _hint_label(self, text):
         """设置项下方的灰色小字说明，避免看不懂选项含义。"""
@@ -2425,6 +2450,7 @@ class TransparentMacWindow(QMainWindow):
             self.tray_icon.setToolTip("WorkBuddy一键备份")
             tray_menu = QMenu()
             tray_menu.addAction("显示窗口", self.show_normal)
+            tray_menu.addAction("设置", self.show_settings)   # 备用入口，保证一定能进设置
             tray_menu.addAction("退出程序", self.exit_application)
             self.tray_icon.setContextMenu(tray_menu)
             self.tray_icon.activated.connect(self.on_tray_activated)
@@ -2580,6 +2606,8 @@ class TransparentMacWindow(QMainWindow):
 
         self.dragging = False
         self.drag_start = QPoint()
+        # 快捷键：Ctrl+, 打开设置
+        QShortcut(QKeySequence("Ctrl+,"), self, activated=self.show_settings)
 
     # ─────────── 通用小组件 ───────────
     def _info_card(self, caption, icon, value_label):
@@ -3026,12 +3054,14 @@ class TransparentMacWindow(QMainWindow):
         sel_all = QPushButton("全选")
         sel_none = QPushButton("全不选")
         refresh = QPushButton("刷新")
+        open_dir = QPushButton("打开备份目录")
         sel_all.clicked.connect(lambda: self._set_all_check(self.tree_backup, True))
         sel_none.clicked.connect(lambda: self._set_all_check(self.tree_backup, False))
         refresh.clicked.connect(self.load_local_sessions)
+        open_dir.clicked.connect(self.on_open_backup_folder)
         lay.addLayout(self._page_head(
             "勾选要备份的对话（分组与 WorkBuddy 侧边栏一致；Ctrl+点空间名可整组勾选）",
-            [sel_all, sel_none, refresh]))
+            [sel_all, sel_none, refresh, open_dir]))
 
         self.tree_backup = self._session_tree()
         lay.addWidget(self.tree_backup, 1)
@@ -3558,12 +3588,22 @@ class TransparentMacWindow(QMainWindow):
         QApplication.quit()
 
     def show_settings(self):
+        """打开设置：异常必须显式告知用户（不能静默失败）。"""
         try:
             dialog = BackupSettingsDialog(self)
             dialog.settings_saved.connect(self.reload_config)
             dialog.exec()
+            # 半透明弹窗关闭后强制重绘，避免主窗口留下残影
+            self.repaint()
+            QApplication.processEvents()
         except Exception as e:
-            LOG.error(f"显示设置对话框错误: {e}")
+            LOG.error(f"显示设置对话框错误: {e}", exc_info=True)
+            try:
+                QMessageBox.critical(
+                    self, "设置打开失败",
+                    f"无法打开设置窗口：\n{e}\n\n详细信息已写入日志文件。")
+            except Exception:
+                pass
 
     def reload_config(self):
         """设置保存后立即生效：刷新引擎、顶部信息卡与备份包列表。"""
