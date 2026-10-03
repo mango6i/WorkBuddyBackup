@@ -11,6 +11,8 @@ import sqlite3
 import tempfile
 import subprocess
 import logging
+import urllib.request
+import urllib.error
 from datetime import datetime
 from ctypes import windll
 
@@ -59,12 +61,44 @@ def get_app_dir():
         return os.path.expanduser("~")
 
 
-# 配置日志（固定写入程序目录，不再写入当前工作目录/桌面）
-logging.basicConfig(
-    filename=os.path.join(get_app_dir(), 'WorkBuddyBackup_error.log'),
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+APP_DIR = get_app_dir()
+
+
+class _LazyFileHandler(logging.Handler):
+    """懒日志文件：只有真正产生 WARNING/ERROR 时才创建文件。
+
+    正常使用时不在电脑上留下任何与备份无关的文件。"""
+
+    def __init__(self, path, level=logging.WARNING):
+        super().__init__(level)
+        self.path = path
+        self._stream = None
+        self.setFormatter(
+            logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+    def emit(self, record):
+        try:
+            if self._stream is None:
+                os.makedirs(os.path.dirname(self.path), exist_ok=True)
+                self._stream = open(self.path, 'a', encoding='utf-8')
+            self._stream.write(self.format(record) + '\n')
+            self._stream.flush()
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            if self._stream:
+                self._stream.close()
+        except Exception:
+            pass
+        super().close()
+
+
+LOG = logging.getLogger("WorkBuddyBackup")   # 统一日志入口（代码内一律用 LOG.xxx）
+LOG.setLevel(logging.DEBUG)
+LOG.addHandler(_LazyFileHandler(os.path.join(APP_DIR, 'WorkBuddyBackup_error.log')))
+LOG.propagate = False
 
 APP_VERSION = "1.1.0"
 REPO_OWNER = "mango6i"
@@ -75,13 +109,42 @@ PROJECT_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 # 配置文件路径
 # ─────────────────────────────────────────────
 def get_config_path():
+    """外观配置（背景/窗口尺寸）独立文件，绝不能与备份设置共用同一个文件。"""
     try:
-        return os.path.join(get_app_dir(), "WorkBuddyBackup_config.json")
+        return os.path.join(APP_DIR, "WorkBuddyBackup_config.json")
     except Exception:
         return os.path.join(os.path.expanduser("~"), "WorkBuddyBackup_config.json")
 
+
+def get_backup_settings_path():
+    """备份设置（保存位置/数据目录/排除项）独立文件，避免被外观配置覆盖。"""
+    try:
+        return os.path.join(APP_DIR, "backup_settings.json")
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), "backup_settings.json")
+
+
 CONFIG_PATH = get_config_path()
-BACKUP_CONFIG_PATH = os.path.join(os.path.dirname(get_config_path()), 'WorkBuddyBackup_config.json')
+BACKUP_CONFIG_PATH = get_backup_settings_path()
+
+
+def _atomic_write_json(path, data):
+    """原子写 JSON：先写临时文件再替换，避免写入中断导致配置损坏。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _read_json(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
 
 # ─────────────────────────────────────────────
 # 全局背景状态（供主窗口和设置对话框共享）
@@ -136,20 +199,24 @@ DEFAULT_BACKUP_CONFIG = {
 def load_backup_config():
     cfg = dict(DEFAULT_BACKUP_CONFIG)
     try:
-        if os.path.exists(BACKUP_CONFIG_PATH):
-            with open(BACKUP_CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            cfg.update(data)
+        data = _read_json(BACKUP_CONFIG_PATH)
+        if data:
+            cfg.update({k: v for k, v in data.items() if v is not None})
     except Exception as e:
-        logging.error(f"加载备份配置失败: {e}")
+        LOG.error(f"加载备份配置失败: {e}")
     return cfg
 
+
 def save_backup_config(cfg):
+    """保存备份设置：与已有内容合并后写入，绝不整文件覆盖导致其它字段丢失。"""
     try:
-        with open(BACKUP_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        merged = _read_json(BACKUP_CONFIG_PATH)
+        merged.update(cfg)
+        _atomic_write_json(BACKUP_CONFIG_PATH, merged)
+        return True
     except Exception as e:
-        logging.error(f"保存备份配置失败: {e}")
+        LOG.error(f"保存备份配置失败: {e}")
+        return False
 
 
 def detect_workbuddy_paths():
@@ -200,8 +267,10 @@ def auto_adjust_config(cfg):
 
 
 def save_config():
+    """保存外观配置：合并写入独立文件，不影响备份设置。"""
     try:
-        data = {
+        merged = _read_json(CONFIG_PATH)
+        merged.update({
             "bg_mode": BG_MODE,
             "bg_direction": BG_DIRECTION,
             "bg_effective_dir": BG_EFFECTIVE_DIR,
@@ -209,19 +278,17 @@ def save_config():
             "bg_random_params": BG_RANDOM_PARAMS,
             "window_width": WINDOW_WIDTH,
             "window_height": WINDOW_HEIGHT,
-        }
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        })
+        _atomic_write_json(CONFIG_PATH, merged)
     except Exception as e:
-        logging.error(f"保存配置失败: {e}")
+        LOG.error(f"保存配置失败: {e}")
 
 def load_config():
     global BG_MODE, BG_DIRECTION, BG_EFFECTIVE_DIR, BG_COLORS, BG_RANDOM_PARAMS
     global WINDOW_WIDTH, WINDOW_HEIGHT
     try:
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        data = _read_json(CONFIG_PATH)
+        if data:
             BG_MODE = data.get("bg_mode", BG_MODE)
             BG_DIRECTION = data.get("bg_direction", BG_DIRECTION)
             BG_EFFECTIVE_DIR = data.get("bg_effective_dir", BG_EFFECTIVE_DIR)
@@ -232,7 +299,7 @@ def load_config():
             WINDOW_WIDTH = max(int(data.get("window_width", WINDOW_WIDTH)), WINDOW_WIDTH)
             WINDOW_HEIGHT = max(int(data.get("window_height", WINDOW_HEIGHT)), WINDOW_HEIGHT)
     except Exception as e:
-        logging.error(f"加载外观配置失败: {e}")
+        LOG.error(f"加载外观配置失败: {e}")
 
 
 # ══════════════════════════════════════════════════════
@@ -665,7 +732,7 @@ class BackupEngine:
             conn.close()
             return uid
         except Exception as e:
-            logging.warning(f"读取账号 user_id 失败: {e}")
+            LOG.warning(f"读取账号 user_id 失败: {e}")
             return ''
 
     def _align_user_ids(self, db_path, target_user_id, progress=None):
@@ -699,7 +766,7 @@ class BackupEngine:
                 progress.emit(
                     "log", f"账号归属对齐：对话 {n_s} 条、自动化 {n_a} 条 → 当前登录账号")
         except Exception as e:
-            logging.warning(f"账号归属对齐失败: {e}")
+            LOG.warning(f"账号归属对齐失败: {e}")
 
     def _checkpoint_db(self):
         """备份前把 WAL 日志合并进主数据库文件，确保备份包含全部最新数据。"""
@@ -710,7 +777,7 @@ class BackupEngine:
                 conn.execute("PRAGMA wal_checkpoint(FULL)")
                 conn.close()
         except Exception as e:
-            logging.warning(f"wal checkpoint 失败（不影响备份继续）: {e}")
+            LOG.warning(f"wal checkpoint 失败（不影响备份继续）: {e}")
 
     def backup(self, out_path, progress=None, selected_ids=None, selected_ws=None):
         self._checkpoint_db()
@@ -743,7 +810,7 @@ class BackupEngine:
                     skipped += 1
                 except Exception as e:
                     skipped += 1
-                    logging.warning(f"备份跳过 {src}: {e}")
+                    LOG.warning(f"备份跳过 {src}: {e}")
                 if progress and i % 200 == 0:
                     progress.emit("progress", i + 1, total)
         if progress:
@@ -811,7 +878,7 @@ class BackupEngine:
                         try:
                             shutil.copy2(s, os.path.join(dst_sessions, f"{sid}.json"))
                         except Exception as e:
-                            logging.warning(f"复制对话 {sid} 失败: {e}")
+                            LOG.warning(f"复制对话 {sid} 失败: {e}")
             elif os.path.isdir(src_sessions) and not selected_ids:
                 if progress:
                     progress.emit("log", "正在恢复全部对话内容...")
@@ -863,7 +930,7 @@ class BackupEngine:
                 if progress:
                     progress.emit("log", f"已备份当前数据表 -> {os.path.basename(bak)}")
             except Exception as e:
-                logging.warning(f"备份当前数据表失败: {e}")
+                LOG.warning(f"备份当前数据表失败: {e}")
 
             conn = sqlite3.connect(dst_db)
             try:
@@ -896,7 +963,7 @@ class BackupEngine:
                         if progress:
                             progress.emit("log", f"  合并 {t}：{n} 行")
                     except Exception as e:
-                        logging.warning(f"合并表 {t} 失败: {e}")
+                        LOG.warning(f"合并表 {t} 失败: {e}")
                         if progress:
                             progress.emit("log", f"[警告] 表 {t} 合并跳过: {e}")
                 conn.commit()
@@ -910,7 +977,7 @@ class BackupEngine:
                     pass
                 conn.close()
         except Exception as e:
-            logging.error(f"合并对话索引失败: {e}")
+            LOG.error(f"合并对话索引失败: {e}")
             if progress:
                 progress.emit("log", f"[错误] 合并对话索引失败: {e}")
             return False
@@ -926,7 +993,7 @@ class BackupEngine:
                 try:
                     shutil.copy2(s, d)
                 except Exception as e:
-                    logging.warning(f"复制失败 {s} -> {d}: {e}")
+                    LOG.warning(f"复制失败 {s} -> {d}: {e}")
 
     def _fix_paths(self, wb_dir, ws_root, old_user, new_user, old_wb, old_ws, progress):
         # 修复 app/sessions.json
@@ -945,7 +1012,7 @@ class BackupEngine:
                     with open(sessions_json, 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                logging.warning(f"修复 sessions.json 失败: {e}")
+                LOG.warning(f"修复 sessions.json 失败: {e}")
 
         # 修复 workbuddy.db
         db_path = os.path.join(wb_dir, 'workbuddy.db')
@@ -961,7 +1028,7 @@ class BackupEngine:
                 conn.commit()
                 conn.close()
             except Exception as e:
-                logging.warning(f"修复 workbuddy.db 失败: {e}")
+                LOG.warning(f"修复 workbuddy.db 失败: {e}")
 
         # 修复 sessions/ 下的每个 json
         sessions_dir = os.path.join(wb_dir, 'sessions')
@@ -978,7 +1045,7 @@ class BackupEngine:
                         with open(fp, 'w', encoding='utf-8') as f:
                             f.write(text)
                 except Exception as e:
-                    logging.warning(f"修复 sessions/{fn} 失败: {e}")
+                    LOG.warning(f"修复 sessions/{fn} 失败: {e}")
 
     def get_default_backup_folder(self):
         return os.path.join(self.save_root, "WorkBuddy备份")
@@ -1032,7 +1099,7 @@ def scan_local_sessions(wb_dir):
             if rows:
                 return rows
         except Exception as e:
-            logging.warning(f"读取本机会话(db)失败: {e}")
+            LOG.warning(f"读取本机会话(db)失败: {e}")
     sj = os.path.join(wb_dir, 'app', 'sessions.json')
     if os.path.exists(sj):
         try:
@@ -1049,7 +1116,7 @@ def scan_local_sessions(wb_dir):
                     'updated_at': s.get('resumedAt') or s.get('startedAt') or '',
                 })
         except Exception as e:
-            logging.warning(f"读取 app/sessions.json 失败: {e}")
+            LOG.warning(f"读取 app/sessions.json 失败: {e}")
     return rows
 
 
@@ -1063,7 +1130,7 @@ def scan_local_workspaces(ws_root):
                 if os.path.isdir(p):
                     items.append({'name': name, 'path': p})
         except Exception as e:
-            logging.warning(f"扫描项目空间失败: {e}")
+            LOG.warning(f"扫描项目空间失败: {e}")
     return items
 
 
@@ -1083,7 +1150,7 @@ def scan_backup_sessions(zip_path):
                 wb_dir = os.path.dirname(os.path.join(tmp, db_member))
                 rows = scan_local_sessions(wb_dir)
     except Exception as e:
-        logging.warning(f"读取备份包会话失败: {e}")
+        LOG.warning(f"读取备份包会话失败: {e}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return rows
@@ -1100,7 +1167,7 @@ def scan_backup_workspaces(zip_path):
                     if len(parts) >= 2 and parts[1]:
                         names.add(parts[1])
     except Exception as e:
-        logging.warning(f"读取备份包项目空间失败: {e}")
+        LOG.warning(f"读取备份包项目空间失败: {e}")
     return [{'name': x, 'path': x} for x in sorted(names)]
 
 
@@ -1122,7 +1189,7 @@ def scan_workspace_map(db_path):
             pass
         conn.close()
     except Exception as e:
-        logging.warning(f"读取 workspaces 表失败: {e}")
+        LOG.warning(f"读取 workspaces 表失败: {e}")
     return paths
 
 
@@ -1355,7 +1422,7 @@ class BackupWorker(QThread):
                 self.emit_log("恢复完成。请重新启动 WorkBuddy 并登录同一账号。")
                 self.done_signal.emit(True, "恢复完成")
         except Exception as e:
-            logging.error(f"工作线程异常: {e}", exc_info=True)
+            LOG.error(f"工作线程异常: {e}", exc_info=True)
             self.emit_log(f"[错误] {e}")
             self.done_signal.emit(False, str(e))
 
@@ -1364,17 +1431,19 @@ class BackupWorker(QThread):
 #  UI 组件
 # ══════════════════════════════════════════════════════
 class CustomToolTip(QWidget):
+    """自绘 tooltip：明确画白色圆角底 + 深色文字，避免系统主题给出黑色提示框。"""
+
     def __init__(self, text, parent=None):
         super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedHeight(24)
+        self.setFixedHeight(26)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(10, 4, 10, 4)
         label = QLabel(text)
         label.setStyleSheet("""
             QLabel {
-                color: #000000;
-                font-size: 12px;
+                color: #334155;
+                font-size: 11px;
                 font-family: 'Microsoft YaHei';
                 background: transparent;
             }
@@ -1399,9 +1468,14 @@ class CustomToolTip(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(0, 0, self.width(), self.height(), 7, 7)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(0, 0, 0, 0)))
-        painter.drawRect(self.rect())
+        painter.setBrush(QBrush(QColor(255, 255, 255, 245)))
+        painter.drawPath(path)
+        painter.setPen(QColor(0, 0, 0, 40))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(0.5, 0.5, self.width() - 1, self.height() - 1, 7, 7)
 
 
 class GradientFrame(QWidget):
@@ -1492,27 +1566,33 @@ class GradientFrame(QWidget):
             painter.setClipping(False)
             super().paintEvent(event)
         except Exception as e:
-            logging.error(f"GradientFrame paintEvent error: {str(e)}")
+            LOG.error(f"GradientFrame paintEvent error: {str(e)}")
 
 
 class ControlButton(QPushButton):
-    def __init__(self, icon, tooltip_text, parent=None):
+    """标题栏圆形控制按钮（设置 / 最小化 / 关闭）。"""
+
+    def __init__(self, icon, tooltip_text, parent=None, danger=False):
         super().__init__(icon, parent)
         self.tooltip_text = tooltip_text
         self.tooltip = None
-        self.setFixedSize(40, 40)
-        self.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(255, 255, 255, 51);
-                color: rgba(0, 0, 0, 179);
-                border-radius: 20px;
-                border: 1px solid rgba(255, 255, 255, 77);
-                font-size: 18px;
+        self._danger = danger
+        self.setFixedSize(34, 34)
+        if danger:
+            hover_bg = "background-color: #ff5f56; color: white;"
+        else:
+            hover_bg = "background-color: rgba(255,255,255,215); color: #1f2937;"
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 70);
+                color: rgba(31, 41, 55, 200);
+                border-radius: 17px;
+                border: 1px solid rgba(255, 255, 255, 110);
+                font-size: 15px;
                 font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 255, 255, 77);
-            }
+            }}
+            QPushButton:hover {{ {hover_bg} }}
+            QPushButton:pressed {{ background-color: rgba(0,0,0,45); color: white; }}
         """)
         self.setMouseTracking(True)
 
@@ -1574,7 +1654,7 @@ class GradientDialog(QDialog):
             painter.setClipping(False)
             super().paintEvent(event)
         except Exception as e:
-            logging.error(f"GradientDialog paintEvent error: {str(e)}")
+            LOG.error(f"GradientDialog paintEvent error: {str(e)}")
 
 
 class ConfirmDialog(GradientDialog):
@@ -1643,7 +1723,7 @@ class ConfirmDialog(GradientDialog):
             painter.drawPath(path)
             super().paintEvent(event)
         except Exception as e:
-            logging.error(f"ConfirmDialog paintEvent error: {str(e)}")
+            LOG.error(f"ConfirmDialog paintEvent error: {str(e)}")
 
     def on_exit(self):
         self.accept()
@@ -1679,9 +1759,12 @@ class AppDialog(GradientDialog):
         self._message = message
         self._ok_text = ok_text
         self._cancel_text = cancel_text
-        self.setMinimumWidth(440)
-        self.setFixedHeight(230)
+        self.setFixedWidth(520)          # 宽度固定，避免长文本把弹窗撑得极宽
         self.init_ui()
+        self.adjustSize()                # 高度按内容自适应，长路径不再被截断
+        scr = QApplication.primaryScreen().availableGeometry()
+        if self.height() > int(scr.height() * 0.86):
+            self.setFixedHeight(int(scr.height() * 0.86))
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -1883,7 +1966,8 @@ class BackupSettingsDialog(GradientDialog):
         self.cfg = load_backup_config()
         self.init_ui()
         # 窗口高度按内容自适应：完整显示所有设置项，不留下方大块空白
-        h = self._content.sizeHint().height() + 130   # 标题栏 + 底部按钮行 + 边距
+        # 130 = 标题栏 + 底部按钮行 + 路径提示行 + 边距
+        h = self._content.sizeHint().height() + 165
         height = max(560, min(h, int(scr.height() * 0.92)))
         self.setFixedSize(width, height)
 
@@ -1948,10 +2032,12 @@ class BackupSettingsDialog(GradientDialog):
         info_row = QHBoxLayout()
         info_row.setSpacing(8)
         link = QLabel(f'<a href="{PROJECT_URL}" style="color:#1a6fd4; text-decoration:none;">'
-                      f'开源地址：{PROJECT_URL}</a>')
+                      f'开源地址 · github.com/{REPO_OWNER}/{REPO_NAME}</a>')
         link.setOpenExternalLinks(True)
         link.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
         link.setStyleSheet("QLabel { font-size: 12px; background: transparent; }")
+        link.setMinimumWidth(1)          # 允许被压缩，绝不能把右侧按钮挤出窗口
+        link.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         info_row.addWidget(link, 1)
         self.check_btn = QPushButton("检查更新")
         self.check_btn.setFixedHeight(30)
@@ -1971,13 +2057,18 @@ class BackupSettingsDialog(GradientDialog):
         self.detect_box.setStyleSheet(self._input_style() + " QTextEdit { font-size: 11px; }")
         self._fill_detect_box()
         detect_row.addWidget(self.detect_box, 1)
-        detect_btn = QPushButton("重新检测")
-        detect_btn.setFixedHeight(92)
-        detect_btn.setFixedWidth(88)
-        detect_btn.setStyleSheet(self._btn_style(bg="rgba(255,255,255,180)", fg="#555"))
-        detect_btn.clicked.connect(self.on_redetect)
-        detect_row.addWidget(detect_btn)
+        self.detect_btn = QPushButton("重新检测")
+        self.detect_btn.setFixedHeight(92)
+        self.detect_btn.setFixedWidth(92)
+        self.detect_btn.setStyleSheet(self._btn_style(bg="rgba(255,255,255,180)", fg="#555"))
+        self.detect_btn.clicked.connect(self.on_redetect)
+        detect_row.addWidget(self.detect_btn)
         content.addLayout(detect_row)
+        self.detect_status = QLabel("")
+        self.detect_status.setStyleSheet(
+            "QLabel { font-size: 10px; color: #16a34a; background: transparent; }")
+        self.detect_status.setVisible(True)   # 常驻占位，避免显示时布局跳动
+        content.addWidget(self.detect_status)
 
         # ── 备份保存位置 ──
         content.addWidget(self._section_label("备份保存位置（备份包存到哪）"))
@@ -2036,9 +2127,9 @@ class BackupSettingsDialog(GradientDialog):
         self.cb_app_session.setChecked(self.cfg.get("wb_exclude_app_session", True))
         self.cb_traces = QCheckBox("排除 traces 调试跟踪")
         self.cb_traces.setChecked(self.cfg.get("wb_exclude_traces", True))
-        self.cb_appearance = QCheckBox("排除 appearance-resources 外观缓存")
+        self.cb_appearance = QCheckBox("排除 appearance 外观缓存")
         self.cb_appearance.setChecked(self.cfg.get("wb_exclude_appearance", True))
-        self.cb_connectors = QCheckBox("排除 connectors-marketplace 市场缓存")
+        self.cb_connectors = QCheckBox("排除 connectors 市场缓存")
         self.cb_connectors.setChecked(self.cfg.get("wb_exclude_connectors_marketplace", True))
         for i, cb in enumerate([self.cb_app_session, self.cb_traces,
                                 self.cb_appearance, self.cb_connectors]):
@@ -2062,20 +2153,34 @@ class BackupSettingsDialog(GradientDialog):
         scroll.setWidget(content_widget)
         root.addWidget(scroll)
 
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(
+            "QLabel { font-size: 11px; color: #16a34a; font-weight: 600; background: transparent; }")
+        self.status_label.setVisible(True)    # 常驻占位，保证按钮始终贴右对齐
+
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(24, 10, 24, 16)
+        btn_row.setContentsMargins(24, 8, 24, 4)
         btn_row.setSpacing(12)
-        reset_btn = QPushButton("恢复默认")
-        reset_btn.setFixedHeight(38)
-        reset_btn.setStyleSheet(self._btn_style(bg="rgba(255,255,255,160)", fg="#555"))
-        reset_btn.clicked.connect(self.on_reset)
-        save_btn = QPushButton("保存")
-        save_btn.setFixedHeight(38)
-        save_btn.setStyleSheet(self._btn_style(bg="rgba(80,80,80,200)", fg="white"))
-        save_btn.clicked.connect(self.on_save)
-        btn_row.addWidget(reset_btn)
-        btn_row.addWidget(save_btn)
+        btn_row.addWidget(self.status_label, 1)
+        self.reset_btn = QPushButton("恢复默认")
+        self.reset_btn.setFixedHeight(38)
+        self.reset_btn.setFixedWidth(96)
+        self.reset_btn.setStyleSheet(self._btn_style(bg="rgba(255,255,255,160)", fg="#555"))
+        self.reset_btn.clicked.connect(self.on_reset)
+        self.save_btn = QPushButton("保存")
+        self.save_btn.setFixedHeight(38)
+        self.save_btn.setFixedWidth(96)
+        self.save_btn.setStyleSheet(self._btn_style(bg="rgba(31,41,55,235)", fg="white"))
+        self.save_btn.clicked.connect(self.on_save)
+        btn_row.addWidget(self.reset_btn)
+        btn_row.addWidget(self.save_btn)
         root.addLayout(btn_row)
+        path_hint = QLabel(f"设置保存在：{BACKUP_CONFIG_PATH}")
+        path_hint.setStyleSheet(
+            "QLabel { font-size: 9px; color: rgba(120,120,130,200); background: transparent;"
+            " padding: 0 24px 10px 24px; }")
+        path_hint.setWordWrap(True)
+        root.addWidget(path_hint)
         strip_focus_rect(self)
 
     def _hint_label(self, text):
@@ -2163,6 +2268,14 @@ class BackupSettingsDialog(GradientDialog):
             QPushButton:hover {{
                 border: 1px solid rgba(0,0,0,90);
             }}
+            QPushButton:pressed {{
+                background-color: rgba(79,172,254,110);
+                color: #0b74c4;
+            }}
+            QPushButton:disabled {{
+                background-color: rgba(255,255,255,120);
+                color: #9aa1ab;
+            }}
         """
 
     def browse_save_root(self):
@@ -2181,14 +2294,21 @@ class BackupSettingsDialog(GradientDialog):
             self.ws_edit.setText(d)
 
     def on_reset(self):
-        self.save_edit.setText("D:/")
-        self.wb_edit.setText(os.path.expanduser("~\\.workbuddy"))
-        self.ws_edit.setText(os.path.expanduser("~\\WorkBuddy"))
+        """恢复默认：立即复位所有输入框并给出可见反馈（点「保存」后才写入配置）。"""
+        self.save_edit.setText(str(DEFAULT_BACKUP_CONFIG["save_root"]))
+        self.wb_edit.setText(str(DEFAULT_BACKUP_CONFIG["workbuddy_dir"]))
+        self.ws_edit.setText(str(DEFAULT_BACKUP_CONFIG["workspaces_root"]))
         self.cb_app_session.setChecked(True)
         self.cb_traces.setChecked(True)
         self.cb_appearance.setChecked(True)
         self.cb_connectors.setChecked(True)
         self.excludes_edit.setPlainText("\n".join(DEFAULT_BACKUP_CONFIG["excludes"]))
+        self._flash(self.status_label, "已恢复默认值，点「保存」后生效")
+
+    def _flash(self, label, text, ms=3200):
+        """一次性状态提示：显示文字数秒后清空（标签常驻，不隐藏，避免布局跳动）。"""
+        label.setText(text)
+        QTimer.singleShot(ms, lambda: label.setText("") if label.text() == text else None)
 
     def on_save(self):
         new_cfg = {
@@ -2201,25 +2321,46 @@ class BackupSettingsDialog(GradientDialog):
             "wb_exclude_appearance": self.cb_appearance.isChecked(),
             "wb_exclude_connectors_marketplace": self.cb_connectors.isChecked(),
         }
-        save_backup_config(new_cfg)
+        if not save_backup_config(new_cfg):
+            AppDialog.show_error(
+                self, "保存失败",
+                f"无法写入配置文件：\n{BACKUP_CONFIG_PATH}\n\n请检查磁盘权限后重试。")
+            return
+        self.cfg = load_backup_config()
         self.settings_saved.emit()
-        self.accept()
+        # 先给一个明确的「已保存」反馈，再关闭窗口
+        self.save_btn.setText("已保存 ✓")
+        self.save_btn.setEnabled(False)
+        self.status_label.setText("设置已保存")
+        QApplication.processEvents()
+        QTimer.singleShot(340, self.accept)
 
     def on_redetect(self):
-        """重新检测并把结果直接显示在设置面板里（不再弹窗）。"""
-        cfg = auto_adjust_config(self.cfg)
-        self.cfg = cfg
-        save_backup_config(cfg)
-        self.wb_edit.setText(cfg.get("workbuddy_dir", ""))
-        self.ws_edit.setText(cfg.get("workspaces_root", ""))
-        self._fill_detect_box()
-        install_p = cfg.get("install_path", "") or "未检测到"
-        if install_p == "未检测到":
-            AppDialog.show_warning(
-                self, "检测完成",
-                "未检测到 WorkBuddy 安装路径，已尽量按默认值填充：\n"
-                f"数据目录：{cfg.get('workbuddy_dir', '')}\n"
-                f"工作空间：{cfg.get('workspaces_root', '')}")
+        """重新检测：按钮先显示「检测中…」，完成后结果填入检测框 + 输入框，并给出可见状态。"""
+        self.detect_btn.setText("检测中…")
+        self.detect_btn.setEnabled(False)
+        self.detect_status.setText("")
+        QApplication.processEvents()
+
+        def _do():
+            try:
+                cfg = auto_adjust_config(dict(self.cfg))
+                self.cfg = cfg
+                save_backup_config(cfg)
+                self.wb_edit.setText(cfg.get("workbuddy_dir", ""))
+                self.ws_edit.setText(cfg.get("workspaces_root", ""))
+                self._fill_detect_box()
+                if cfg.get("install_path", ""):
+                    self._flash(self.detect_status,
+                                f"✓ 检测完成，已更新路径（{datetime.now().strftime('%H:%M:%S')}）")
+                else:
+                    self._flash(self.detect_status,
+                                "✓ 检测完成：未找到 WorkBuddy 程序，已按默认路径填充")
+            finally:
+                self.detect_btn.setText("重新检测")
+                self.detect_btn.setEnabled(True)
+
+        QTimer.singleShot(140, _do)
 
 
 # ══════════════════════════════════════════════════════
@@ -2289,7 +2430,7 @@ class TransparentMacWindow(QMainWindow):
             self.tray_icon.activated.connect(self.on_tray_activated)
             self.tray_icon.show()
         except Exception as e:
-            logging.error(f"托盘图标初始化错误: {e}")
+            LOG.error(f"托盘图标初始化错误: {e}")
             self.tray_icon = None
 
     def on_tray_activated(self, reason):
@@ -2306,89 +2447,117 @@ class TransparentMacWindow(QMainWindow):
         frame_layout = QVBoxLayout(self.gradient_frame)
         frame_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 标题栏：标题放左上角，右侧为控制按钮
+        # ── 标题栏：品牌区（图标 + 标题 + 版本） + 右侧窗口控制 ──
         title_bar = QHBoxLayout()
-        title_bar.setContentsMargins(24, 16, 20, 0)
+        title_bar.setContentsMargins(22, 14, 18, 0)
+        title_bar.setSpacing(14)
+
+        brand = QFrame()
+        brand.setFixedSize(40, 40)
+        brand.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #4facfe, stop:1 #00c6ff);
+                border-radius: 12px;
+            }
+        """)
+        brand_lay = QVBoxLayout(brand)
+        brand_lay.setContentsMargins(0, 0, 0, 0)
+        brand_icon = QLabel("💾")
+        brand_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        brand_icon.setStyleSheet("QLabel { font-size: 19px; background: transparent; }")
+        brand_lay.addWidget(brand_icon)
+        title_bar.addWidget(brand, 0, Qt.AlignmentFlag.AlignVCenter)
+
         title_col = QVBoxLayout()
-        title_col.setSpacing(2)
-        title = QLabel(f"WorkBuddy 一键备份 v{APP_VERSION}")
+        title_col.setSpacing(3)
+        title_line = QHBoxLayout()
+        title_line.setSpacing(8)
+        title = QLabel("WorkBuddy 一键备份")
         title.setStyleSheet("""
+            QLabel { font-size: 17px; color: #1f2937; background: transparent;
+                     font-weight: bold; letter-spacing: 0.3px; }
+        """)
+        ver_chip = QLabel(f"v{APP_VERSION}")
+        ver_chip.setStyleSheet("""
             QLabel {
-                font-size: 17px;
-                color: #2c3e50;
-                background: transparent;
-                font-weight: bold;
+                background-color: rgba(79,172,254,38); color: #0b74c4;
+                border-radius: 8px; padding: 2px 8px;
+                font-size: 10px; font-weight: 700;
             }
         """)
-        subtitle = QLabel("勾选对话即可备份 / 恢复；换电脑登录同一账号即可还原")
+        title_line.addWidget(title)
+        title_line.addWidget(ver_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_line.addStretch()
+        title_col.addLayout(title_line)
+        subtitle = QLabel("勾选对话即可备份 / 恢复 · 换电脑登录同一账号即可无损还原")
         subtitle.setStyleSheet("""
-            QLabel {
-                font-size: 10px;
-                color: #888;
-                background: transparent;
-            }
+            QLabel { font-size: 11px; color: #6b7280; background: transparent; }
         """)
-        title_col.addWidget(title)
         title_col.addWidget(subtitle)
-        title_bar.addLayout(title_col)
+        title_bar.addLayout(title_col, 1)
         title_bar.addStretch()
+
         controls_layout = QHBoxLayout()
-        controls_layout.setSpacing(15)
+        controls_layout.setSpacing(10)
         settings_btn = ControlButton("⚙️", "设置")
         settings_btn.clicked.connect(self.show_settings)
         minimize_btn = ControlButton("-", "最小化")
         minimize_btn.clicked.connect(self.showMinimized)
-        close_btn = ControlButton("×", "关闭")
+        close_btn = ControlButton("×", "关闭", danger=True)
         close_btn.clicked.connect(self.show_confirm_dialog)
         controls_layout.addWidget(settings_btn)
         controls_layout.addWidget(minimize_btn)
         controls_layout.addWidget(close_btn)
         title_bar.addLayout(controls_layout)
+        title_bar.setAlignment(controls_layout, Qt.AlignmentFlag.AlignTop)
         frame_layout.addLayout(title_bar)
 
-        # 内容区（压缩上下留白，把空间让给对话列表）
+        # ── 内容区 ──
         content = QVBoxLayout()
-        content.setContentsMargins(24, 8, 24, 12)
-        content.setSpacing(8)
+        content.setContentsMargins(22, 12, 22, 16)
+        content.setSpacing(10)
 
-        # 信息条（紧凑）
-        info_card = QFrame()
-        info_card.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255,255,255,150);
-                border-radius: 10px;
-                border: 1px solid rgba(255,255,255,120);
-            }
-            QLabel { background: transparent; color: #555; font-size: 10px; }
-        """)
-        info_layout = QGridLayout(info_card)
-        info_layout.setContentsMargins(12, 5, 12, 5)
-        info_layout.setSpacing(2)
-        self.lbl_wb = QLabel(f"数据: {self.engine.wb_dir}")
-        self.lbl_ws = QLabel(f"项目: {self.engine.ws_root}")
-        self.lbl_save = QLabel(f"保存: {self.engine.get_default_backup_folder()}")
-        self.lbl_wb.setWordWrap(True)
-        self.lbl_ws.setWordWrap(True)
-        self.lbl_save.setWordWrap(True)
-        info_layout.addWidget(self.lbl_wb, 0, 0)
-        info_layout.addWidget(self.lbl_ws, 0, 1)
-        info_layout.addWidget(self.lbl_save, 1, 0, 1, 2)
-        content.addWidget(info_card)
+        # 信息条：三张等宽小卡片，路径过长自动省略（不换行，避免撑高）
+        info_row = QHBoxLayout()
+        info_row.setSpacing(10)
+        self.lbl_wb = self._info_card_value()
+        self.lbl_ws = self._info_card_value()
+        self.lbl_save = self._info_card_value()
+        for _cap, _lbl, _ico in (("WorkBuddy 数据", self.lbl_wb, "🗂"),
+                                 ("项目源代码", self.lbl_ws, "📦"),
+                                 ("备份保存位置", self.lbl_save, "💾")):
+            info_row.addWidget(self._info_card(_cap, _ico, _lbl), 1)
+        self._sync_info_labels()
+        content.addLayout(info_row)
 
         # 界面切换（备份 / 恢复）
         tab_row = QHBoxLayout()
-        tab_row.setSpacing(12)
-        self.tab_backup_btn = QPushButton("备份")
-        self.tab_restore_btn = QPushButton("恢复")
+        tab_row.setSpacing(4)
+        tab_box = QFrame()
+        tab_box.setFixedHeight(44)
+        tab_box.setStyleSheet("""
+            QFrame { background-color: rgba(255,255,255,145); border-radius: 12px;
+                     border: 1px solid rgba(255,255,255,160); }
+        """)
+        tab_box_lay = QHBoxLayout(tab_box)
+        tab_box_lay.setContentsMargins(5, 5, 5, 5)
+        tab_box_lay.setSpacing(4)
+        self.tab_backup_btn = QPushButton("  备份  ")
+        self.tab_restore_btn = QPushButton("  恢复  ")
         for _b in (self.tab_backup_btn, self.tab_restore_btn):
-            _b.setFixedHeight(38)
-            _b.setMinimumWidth(120)
+            _b.setFixedHeight(34)
+            _b.setMinimumWidth(104)
             _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            tab_box_lay.addWidget(_b)
         self.tab_backup_btn.clicked.connect(lambda: self.switch_page(0))
         self.tab_restore_btn.clicked.connect(lambda: self.switch_page(1))
-        tab_row.addWidget(self.tab_backup_btn)
-        tab_row.addWidget(self.tab_restore_btn)
+        tab_row.addWidget(tab_box)
         tab_row.addStretch()
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet(
+            "QLabel { color:#0b74c4; font-size:11px; font-weight:600; background:transparent; }")
+        tab_row.addWidget(self.lbl_status)
         content.addLayout(tab_row)
 
         # 双界面容器
@@ -2412,22 +2581,68 @@ class TransparentMacWindow(QMainWindow):
         self.dragging = False
         self.drag_start = QPoint()
 
+    # ─────────── 通用小组件 ───────────
+    def _info_card(self, caption, icon, value_label):
+        """顶部信息卡：小标题 + 图标 + 路径（过长自动省略，不撑高布局）。"""
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255,255,255,160);
+                border-radius: 11px;
+                border: 1px solid rgba(255,255,255,170);
+            }
+        """)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(11, 7, 11, 8)
+        lay.setSpacing(3)
+        cap = QLabel(f"{icon}  {caption}")
+        cap.setStyleSheet(
+            "QLabel { color:#7b8494; font-size:10px; background:transparent; font-weight:600; }")
+        value_label.setStyleSheet(
+            "QLabel { color:#374151; font-size:11px; background:transparent; }")
+        lay.addWidget(cap)
+        lay.addWidget(value_label)
+        return card
+
+    @staticmethod
+    def _info_card_value():
+        lbl = QLabel("")
+        lbl.setMinimumWidth(60)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        return lbl
+
+    def _sync_info_labels(self):
+        """把信息卡文字同步为当前配置（路径过长时中间省略，保持单行）。"""
+        fm = self.fontMetrics()
+        for lbl, text in ((self.lbl_wb, self.engine.wb_dir),
+                          (self.lbl_ws, self.engine.ws_root),
+                          (self.lbl_save, self.engine.get_default_backup_folder())):
+            lbl.setText(fm.elidedText(text, Qt.TextElideMode.ElideMiddle, 250))
+
+    def flash_status(self, text, ms=2600):
+        """在 Tab 行右侧显示一次性状态提示（替代侵入式弹窗）。"""
+        self.lbl_status.setText(text)
+        QTimer.singleShot(ms, lambda: self.lbl_status.setText("")
+                          if self.lbl_status.text() == text else None)
+
     # ─────────── 双界面：样式与通用组件 ───────────
     def _tab_style(self, active):
         if active:
             return """
                 QPushButton {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4facfe, stop:1 #00f2fe);
-                    color: white; border: none; border-radius: 12px;
-                    font-size: 13px; font-weight: bold; padding: 0 18px;
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #4facfe, stop:1 #00c6ff);
+                    color: white; border: none; border-radius: 10px;
+                    font-size: 13px; font-weight: bold; padding: 0 16px;
                 }
+                QPushButton:hover { background-color: #3ea6f5; }
             """
         return """
             QPushButton {
-                background-color: rgba(255,255,255,150); color: #555; border: none;
-                border-radius: 12px; font-size: 13px; font-weight: 600; padding: 0 18px;
+                background-color: transparent; color: #6b7280; border: none;
+                border-radius: 10px; font-size: 13px; font-weight: 600; padding: 0 16px;
             }
-            QPushButton:hover { background-color: rgba(255,255,255,225); }
+            QPushButton:hover { background-color: rgba(0,0,0,35); color: #374151; }
         """
 
     def switch_page(self, idx):
@@ -2439,13 +2654,32 @@ class TransparentMacWindow(QMainWindow):
             self.refresh_zip_list()
 
     def _small_btn_style(self):
+        """次要按钮：带明确下压反馈，避免「点了没反应」的错觉。"""
         return """
             QPushButton {
-                background-color: rgba(255,255,255,180); color: #444; border: none;
-                outline: none; border-radius: 8px; font-size: 12px; font-weight: 600; padding: 0 12px;
+                background-color: rgba(255,255,255,195); color: #444; border: none;
+                outline: none; border-radius: 9px; font-size: 12px; font-weight: 600;
+                padding: 0 13px; min-width: 54px;
             }
-            QPushButton:hover { background-color: rgba(255,255,255,235); }
+            QPushButton:hover { background-color: rgba(255,255,255,245); color: #1f2937; }
+            QPushButton:pressed { background-color: rgba(79,172,254,95); color: #0b74c4; }
+            QPushButton:disabled { color: #aab0ba; background-color: rgba(255,255,255,110); }
             QPushButton:focus { outline: none; border: none; }
+        """
+
+    def _danger_btn_style(self):
+        """危险操作按钮（删除备份包）。"""
+        return """
+            QPushButton {
+                background-color: rgba(239,68,68,26); color: #dc2626;
+                border: 1px solid rgba(239,68,68,90); outline: none; border-radius: 9px;
+                font-size: 12px; font-weight: 600; padding: 0 13px; min-width: 54px;
+            }
+            QPushButton:hover { background-color: rgba(239,68,68,55); color: #b91c1c; }
+            QPushButton:pressed { background-color: rgba(239,68,68,115); color: #7f1d1d; }
+            QPushButton:disabled { color: #c9a0a0; background-color: rgba(239,68,68,15);
+                                   border: 1px solid rgba(239,68,68,40); }
+            QPushButton:focus { outline: none; }
         """
 
     def _primary_btn_style(self, c1, c2):
@@ -2502,10 +2736,14 @@ class TransparentMacWindow(QMainWindow):
         tree.setAlternatingRowColors(True)
         tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        # 列 0 按内容自适应（时间紧跟标题之后），列 1 拉伸剩余空间
-        tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        tree.header().setMaximumSectionSize(620)
+        # 列宽策略：标题列铺满剩余空间（超长自动省略号），时间列固定宽度。
+        # 固定宽度可避免对话数量/标题长度变化时列宽跳动导致界面错位。
+        tree.setTextElideMode(Qt.TextElideMode.ElideRight)
+        hh = tree.header()
+        hh.setStretchLastSection(False)
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        tree.setColumnWidth(1, 200)
         tree.setStyleSheet("""
             QTreeWidget {
                 background-color: rgba(255,255,255,185); border-radius: 12px;
@@ -2523,7 +2761,18 @@ class TransparentMacWindow(QMainWindow):
                 outline: none; border: none; background: transparent;
             }
             QTreeWidget::indicator {
-                width: 13px; height: 13px;
+                width: 15px; height: 15px; border-radius: 4px;
+                border: 1px solid rgba(0,0,0,95); background-color: #ffffff;
+            }
+            QTreeWidget::indicator:hover { border: 1px solid rgba(47,143,232,180); }
+            QTreeWidget::indicator:checked {
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #5bb8ff, stop:1 #2f8fe8);
+                border: 1px solid #2377c8;
+            }
+            QTreeWidget::indicator:indeterminate {
+                background-color: rgba(79,172,254,130);
+                border: 1px solid #2f8fe8;
             }
             QTreeWidget::branch { background: transparent; }
             QTreeWidget::branch:hover {
@@ -2659,10 +2908,8 @@ class TransparentMacWindow(QMainWindow):
             cwd = str(r.get('cwd') or '')
             top = self._group_key(cwd, ws_paths)
             it = QTreeWidgetItem()
-            title = str(r.get('title') or '')
-            if len(title) > 30:
-                title = title[:30] + '…'
-            it.setText(0, title)
+            # 不手工截断：列宽固定后由 Qt 自动省略，更多文字能完整显示
+            it.setText(0, str(r.get('title') or ''))
             it.setText(1, self._fmt_time(r.get('updated_at')))
             # 不设置 tooltip：系统 tooltip 在深色主题下会弹黑色提示框
             # 官方样式：时间紧跟对话名之后、灰色小字（左对齐，不贴最右）
@@ -2687,7 +2934,7 @@ class TransparentMacWindow(QMainWindow):
                 ws_groups[disp].addChild(it)
         task_root.setText(0, f"任务 ({task_count})")
         ws_root.setText(0, f"空间 ({len(ws_groups)})")
-        tree.resizeColumnToContents(1)
+        # 不再调用 resizeColumnToContents：列宽固定，避免恢复后因数据变化导致布局错乱
 
     def _iter_items(self, tree):
         """深度优先遍历树中所有节点（含组节点）。"""
@@ -2748,44 +2995,54 @@ class TransparentMacWindow(QMainWindow):
                 names.add(top)
         return sorted(names)
 
+    def _page_head(self, text, buttons):
+        """页面头部：左侧说明，右侧一排次要按钮。"""
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        tip = QLabel(text)
+        tip.setStyleSheet(
+            "QLabel { color:#4b5563; font-size:12px; font-weight:600; background:transparent; }")
+        head.addWidget(tip)
+        head.addStretch()
+        for b in buttons:
+            b.setFixedHeight(30)
+            b.setStyleSheet(self._small_btn_style())
+            head.addWidget(b)
+        return head
+
+    def _count_label(self):
+        lbl = QLabel("共 0 个对话")
+        lbl.setStyleSheet(
+            "QLabel { color:#6b7280; font-size:11px; background:transparent; }")
+        return lbl
+
     # ─────────── 备份页 ───────────
     def _build_backup_page(self):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(9)
 
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        tip = QLabel("勾选要备份的对话（分组与 WorkBuddy 侧边栏一致；Ctrl+点空间名可整组勾选）：")
-        tip.setStyleSheet("QLabel { color:#444; font-size:12px; font-weight:600; background:transparent; }")
-        head.addWidget(tip)
-        head.addStretch()
         sel_all = QPushButton("全选")
         sel_none = QPushButton("全不选")
         refresh = QPushButton("刷新")
-        for b in (sel_all, sel_none, refresh):
-            b.setFixedHeight(30)
-            b.setStyleSheet(self._small_btn_style())
         sel_all.clicked.connect(lambda: self._set_all_check(self.tree_backup, True))
         sel_none.clicked.connect(lambda: self._set_all_check(self.tree_backup, False))
         refresh.clicked.connect(self.load_local_sessions)
-        head.addWidget(sel_all)
-        head.addWidget(sel_none)
-        head.addWidget(refresh)
-        lay.addLayout(head)
+        lay.addLayout(self._page_head(
+            "勾选要备份的对话（分组与 WorkBuddy 侧边栏一致；Ctrl+点空间名可整组勾选）",
+            [sel_all, sel_none, refresh]))
 
         self.tree_backup = self._session_tree()
         lay.addWidget(self.tree_backup, 1)
 
-        self.lbl_bk_count = QLabel("共 0 个对话")
-        self.lbl_bk_count.setStyleSheet("QLabel { color:#666; font-size:11px; background:transparent; }")
+        self.lbl_bk_count = self._count_label()
         lay.addWidget(self.lbl_bk_count)
 
         btn = QPushButton("备份所选对话")
-        btn.setFixedHeight(42)
+        btn.setFixedHeight(44)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(self._primary_btn_style("#4facfe", "#00f2fe"))
+        btn.setStyleSheet(self._primary_btn_style("#4facfe", "#00c6ff"))
         btn.clicked.connect(self.on_backup)
         lay.addWidget(btn)
 
@@ -2800,23 +3057,36 @@ class TransparentMacWindow(QMainWindow):
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(9)
+
+        # 备份包选择 + 管理（浏览 / 刷新 / 打开目录 / 删除）
+        pick_card = QFrame()
+        pick_card.setStyleSheet("""
+            QFrame { background-color: rgba(255,255,255,150); border-radius: 11px;
+                     border: 1px solid rgba(255,255,255,165); }
+        """)
+        pick_lay = QVBoxLayout(pick_card)
+        pick_lay.setContentsMargins(12, 9, 12, 10)
+        pick_lay.setSpacing(7)
 
         pick_row = QHBoxLayout()
-        pick_row.setSpacing(8)
-        tip_pick = QLabel("备份包：")
-        tip_pick.setStyleSheet("QLabel { color:#444; font-size:13px; font-weight:600; background:transparent; }")
+        pick_row.setSpacing(7)
+        cap = QLabel("备份包")
+        cap.setStyleSheet(
+            "QLabel { color:#6b7280; font-size:11px; font-weight:700; background:transparent; }")
+        cap.setFixedWidth(46)
         self.zip_combo = QComboBox()
         self.zip_combo.setFixedHeight(32)
-        self.zip_combo.setMinimumWidth(320)
+        self.zip_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.zip_combo.setStyleSheet("""
             QComboBox {
-                background-color: rgba(255,255,255,190); color: #444;
-                border: 1px solid rgba(0,0,0,30); border-radius: 8px;
+                background-color: rgba(255,255,255,205); color: #374151;
+                border: 1px solid rgba(0,0,0,35); border-radius: 9px;
                 padding: 0 10px; font-size: 12px;
             }
-            QComboBox:focus { outline: none; }
-            QComboBox::drop-down { border: none; width: 24px; }
+            QComboBox:hover { background-color: rgba(255,255,255,240); }
+            QComboBox:focus { outline: none; border: 1px solid rgba(79,172,254,150); }
+            QComboBox::drop-down { border: none; width: 22px; }
             QComboBox QAbstractItemView {
                 background-color: white; color: #333;
                 border: 1px solid rgba(0,0,0,40);
@@ -2825,42 +3095,55 @@ class TransparentMacWindow(QMainWindow):
             }
         """)
         self.zip_combo.currentIndexChanged.connect(self.on_zip_selected)
-        self.lbl_zip = QLabel("未选择备份包")
-        self.lbl_zip.setStyleSheet("QLabel { color:#666; font-size:11px; background:transparent; }")
-        self.lbl_zip.setWordWrap(True)
-        pick_row.addWidget(tip_pick)
+        pick_row.addWidget(cap)
         pick_row.addWidget(self.zip_combo, 1)
-        lay.addLayout(pick_row)
-        lay.addWidget(self.lbl_zip)
 
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        tip = QLabel("勾选要恢复的对话（自动读取备份包；分组与官方侧边栏一致）：")
-        tip.setStyleSheet("QLabel { color:#444; font-size:12px; font-weight:600; background:transparent; }")
-        head.addWidget(tip)
-        head.addStretch()
+        self.btn_zip_browse = QPushButton("浏览")
+        self.btn_zip_refresh = QPushButton("刷新")
+        self.btn_zip_open = QPushButton("打开目录")
+        self.btn_zip_delete = QPushButton("删除")
+        self.btn_zip_browse.setFixedHeight(30)
+        self.btn_zip_refresh.setFixedHeight(30)
+        self.btn_zip_open.setFixedHeight(30)
+        self.btn_zip_delete.setFixedHeight(30)
+        self.btn_zip_browse.setStyleSheet(self._small_btn_style())
+        self.btn_zip_refresh.setStyleSheet(self._small_btn_style())
+        self.btn_zip_open.setStyleSheet(self._small_btn_style())
+        self.btn_zip_delete.setStyleSheet(self._danger_btn_style())
+        self.btn_zip_browse.clicked.connect(self.on_pick_zip)
+        self.btn_zip_refresh.clicked.connect(self.on_refresh_zip_list)
+        self.btn_zip_open.clicked.connect(self.on_open_backup_folder)
+        self.btn_zip_delete.clicked.connect(self.on_delete_zip)
+        for b in (self.btn_zip_browse, self.btn_zip_refresh,
+                  self.btn_zip_open, self.btn_zip_delete):
+            pick_row.addWidget(b)
+        pick_lay.addLayout(pick_row)
+
+        self.lbl_zip = QLabel("未选择备份包")
+        self.lbl_zip.setStyleSheet(
+            "QLabel { color:#6b7280; font-size:11px; background:transparent; }")
+        self.lbl_zip.setWordWrap(True)
+        pick_lay.addWidget(self.lbl_zip)
+        lay.addWidget(pick_card)
+
         sel_all = QPushButton("全选")
         sel_none = QPushButton("全不选")
-        for b in (sel_all, sel_none):
-            b.setFixedHeight(30)
-            b.setStyleSheet(self._small_btn_style())
         sel_all.clicked.connect(lambda: self._set_all_check(self.tree_restore, True))
         sel_none.clicked.connect(lambda: self._set_all_check(self.tree_restore, False))
-        head.addWidget(sel_all)
-        head.addWidget(sel_none)
-        lay.addLayout(head)
+        lay.addLayout(self._page_head(
+            "勾选要恢复的对话（分组与官方侧边栏一致；Ctrl+点空间名可整组勾选）",
+            [sel_all, sel_none]))
 
         self.tree_restore = self._session_tree()
         lay.addWidget(self.tree_restore, 1)
 
-        self.lbl_rs_count = QLabel("共 0 个对话")
-        self.lbl_rs_count.setStyleSheet("QLabel { color:#666; font-size:11px; background:transparent; }")
+        self.lbl_rs_count = self._count_label()
         lay.addWidget(self.lbl_rs_count)
 
         btn = QPushButton("恢复所选对话")
-        btn.setFixedHeight(42)
+        btn.setFixedHeight(44)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setStyleSheet(self._primary_btn_style("#a18cd1", "#fbc2eb"))
+        btn.setStyleSheet(self._primary_btn_style("#a78bfa", "#f0abfc"))
         btn.clicked.connect(self.on_restore)
         lay.addWidget(btn)
 
@@ -2881,7 +3164,7 @@ class TransparentMacWindow(QMainWindow):
                     lambda msg: AppDialog.show_info(self, "检查更新", msg))
             self._update_checker.start()
         except Exception as e:
-            logging.warning(f"检查更新失败: {e}")
+            LOG.warning(f"检查更新失败: {e}")
 
     def _on_update_found(self, info):
         tag = info.get('tag', '')
@@ -2905,8 +3188,21 @@ class TransparentMacWindow(QMainWindow):
             self.lbl_bk_count.setText(f"共 {len(rows)} 个对话（默认全选）")
             self.log(f"已扫描本机对话：{len(rows)} 个")
         except Exception as e:
-            logging.error(f"扫描本机会话失败: {e}")
+            LOG.error(f"扫描本机会话失败: {e}")
             self.log(f"[错误] 扫描本机会话失败: {e}")
+
+    @staticmethod
+    def _human_size(n):
+        """字节数转可读大小。"""
+        try:
+            n = float(n)
+        except Exception:
+            return "-"
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024 or unit == "GB":
+                return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            n /= 1024.0
+        return f"{n:.1f} GB"
 
     def refresh_zip_list(self):
         """自动搜索默认备份目录下的所有备份包，按时间倒序填入下拉框并自动加载最新的一个。"""
@@ -2921,36 +3217,160 @@ class TransparentMacWindow(QMainWindow):
                         if f.lower().endswith('.zip')]
                 zips.sort(key=lambda p: os.path.getmtime(p), reverse=True)
             except Exception as e:
-                logging.warning(f"搜索备份包失败: {e}")
+                LOG.warning(f"搜索备份包失败: {e}")
+        prev = self.restore_zip if combo.count() > 1 else ""
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("浏览其他备份包…")
-        combo.setItemData(0, "__browse__")
+        combo.addItem("— 请选择备份包 —")
+        combo.setItemData(0, "")
         for z in zips:
-            combo.addItem(f"{os.path.basename(z)}", userData=z)
+            try:
+                size = self._human_size(os.path.getsize(z))
+                mtime = datetime.fromtimestamp(os.path.getmtime(z)).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                size, mtime = "-", ""
+            combo.addItem(f"{os.path.basename(z)}    ·    {size}    ·    {mtime}",
+                          userData=z)
         combo.blockSignals(False)
         if zips:
-            combo.setCurrentIndex(1)  # 自动加载最新备份包
-            self.load_backup_zip(zips[0])
+            idx = 1
+            if prev:
+                found = combo.findData(prev)
+                if found > 0:
+                    idx = found
+            combo.setCurrentIndex(idx)
+            self.load_backup_zip(combo.itemData(idx))
         else:
             combo.setCurrentIndex(0)
+            self.restore_zip = ""
             self.lbl_zip.setText(
-                f"未在 {folder} 找到备份包；可下拉选择「浏览其他备份包…」手动指定。")
+                f"备份目录 {folder} 下暂无备份包；可点「浏览」手动指定 zip 文件。")
             self.tree_restore.clear()
             self.lbl_rs_count.setText("共 0 个对话")
+        self._update_zip_manage_buttons()
+
+    def _update_zip_manage_buttons(self):
+        """没有选中备份包时禁用「打开目录 / 删除」，避免出现无效点击。"""
+        has = bool(getattr(self, 'restore_zip', '')) and os.path.exists(self.restore_zip)
+        if hasattr(self, 'btn_zip_delete'):
+            self.btn_zip_delete.setEnabled(has)
+        if hasattr(self, 'btn_zip_open'):
+            self.btn_zip_open.setEnabled(bool(
+                self.engine and os.path.isdir(self.engine.get_default_backup_folder())))
+
+    def on_refresh_zip_list(self):
+        """刷新备份包列表（带可见反馈）。"""
+        self.refresh_zip_list()
+        folder = self.engine.get_default_backup_folder()
+        n = max(0, self.zip_combo.count() - 1)
+        self.flash_status(f"已刷新：{folder} 下共 {n} 个备份包")
+
+    def on_open_backup_folder(self):
+        """在系统资源管理器中打开备份目录，方便直接管理备份文件。"""
+        folder = self.engine.get_default_backup_folder()
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            from PyQt6.QtGui import QDesktopServices
+            from PyQt6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+            self.flash_status(f"已打开备份目录：{folder}")
+        except Exception as e:
+            LOG.warning(f"打开备份目录失败: {e}")
+            AppDialog.show_error(self, "打开失败", f"无法打开目录：\n{folder}\n\n{e}")
+
+    def on_delete_zip(self):
+        """删除当前选中的备份包（二次确认后移入回收站，失败则直接删除）。"""
+        zip_path = getattr(self, 'restore_zip', '')
+        if not zip_path or not os.path.exists(zip_path):
+            AppDialog.show_warning(self, "未选择备份包", "请先在上方下拉框选择要删除的备份包。")
+            return
+        name = os.path.basename(zip_path)
+        size = self._human_size(os.path.getsize(zip_path)) if os.path.exists(zip_path) else "-"
+        if not AppDialog.ask_question(
+                self, "删除备份包",
+                f"确定要删除这个备份包吗？\n\n{name}\n大小：{size}\n\n"
+                f"删除后不可恢复（会先移入回收站，可在回收站还原）。",
+                ok_text="删除", cancel_text="取消"):
+            return
+        ok, err = self._trash_or_delete(zip_path)
+        if ok:
+            self.log(f"[删除] 已删除备份包：{name}")
+            self.flash_status(f"已删除备份包：{name}")
+            self.restore_zip = ""
+            self.refresh_zip_list()
+        else:
+            AppDialog.show_error(self, "删除失败", f"无法删除该备份包：\n{name}\n\n{err}")
+
+    @staticmethod
+    def _trash_or_delete(path):
+        """优先移入回收站（可还原），失败时回退为直接删除。"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", wintypes.HWND),
+                    ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", ctypes.c_uint16),
+                    ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", wintypes.LPCWSTR),
+                ]
+
+            FO_DELETE = 3
+            FOF_ALLOWUNDO = 0x0040
+            FOF_NOCONFIRMATION = 0x0010
+            FOF_SILENT = 0x0004
+            FOF_NOERRORUI = 0x0400
+            op = SHFILEOPSTRUCTW()
+            op.hwnd = None
+            op.wFunc = FO_DELETE
+            op.pFrom = path + "\0\0"
+            op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
+            ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+            # 该 API 返回值不可靠，以文件是否消失为准
+            if not os.path.exists(path):
+                return True, ""
+        except Exception as e:
+            LOG.warning(f"移入回收站失败: {e}")
+        try:
+            os.remove(path)
+            return (not os.path.exists(path)), ""
+        except Exception as e:
+            return False, str(e)
 
     def on_zip_selected(self, index):
         if index <= 0:
-            if index == 0 and self.zip_combo.itemData(0) == "__browse__":
-                self.on_pick_zip()
+            self.restore_zip = ""
+            self.tree_restore.clear()
+            self.lbl_rs_count.setText("共 0 个对话")
+            self.lbl_zip.setText("未选择备份包")
+            self._update_zip_manage_buttons()
             return
         zip_path = self.zip_combo.itemData(index)
         if zip_path:
             self.load_backup_zip(str(zip_path))
+        else:
+            self._update_zip_manage_buttons()
 
     def load_backup_zip(self, zip_path):
+        if not zip_path or not os.path.exists(zip_path):
+            self.restore_zip = ""
+            self._update_zip_manage_buttons()
+            return
         self.restore_zip = zip_path
-        self.lbl_zip.setText(zip_path)
+        try:
+            size = self._human_size(os.path.getsize(zip_path))
+            mtime = datetime.fromtimestamp(os.path.getmtime(zip_path)).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            size, mtime = "-", ""
+        self.lbl_zip.setText(f"{zip_path}    ·    {size}    ·    备份于 {mtime}")
         try:
             rows = scan_backup_sessions(zip_path)
             ws_paths = self._scan_backup_ws_map(zip_path)
@@ -2958,8 +3378,9 @@ class TransparentMacWindow(QMainWindow):
             self.lbl_rs_count.setText(f"共 {len(rows)} 个对话（默认全选）")
             self.log(f"已读取备份包：{os.path.basename(zip_path)}，含 {len(rows)} 个对话")
         except Exception as e:
-            logging.error(f"读取备份包失败: {e}")
+            LOG.error(f"读取备份包失败: {e}")
             AppDialog.show_error(self, "读取失败", f"无法读取该备份包：\n{e}")
+        self._update_zip_manage_buttons()
 
     def _scan_backup_ws_map(self, zip_path):
         """从备份 zip 的 workbuddy.db 读取登记空间路径集合。"""
@@ -2977,7 +3398,7 @@ class TransparentMacWindow(QMainWindow):
                     wb_dir = os.path.dirname(os.path.join(tmp, db_member))
                     paths = scan_workspace_map(os.path.join(wb_dir, 'workbuddy.db'))
         except Exception as e:
-            logging.warning(f"读取备份包空间名失败: {e}")
+            LOG.warning(f"读取备份包空间名失败: {e}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         return paths
@@ -3110,7 +3531,7 @@ class TransparentMacWindow(QMainWindow):
             dialog = ConfirmDialog(self)
             dialog.exec()
         except Exception as e:
-            logging.error(f"显示确认对话框错误: {e}")
+            LOG.error(f"显示确认对话框错误: {e}")
             QApplication.quit()
 
     def hide_to_tray(self):
@@ -3142,15 +3563,17 @@ class TransparentMacWindow(QMainWindow):
             dialog.settings_saved.connect(self.reload_config)
             dialog.exec()
         except Exception as e:
-            logging.error(f"显示设置对话框错误: {e}")
+            LOG.error(f"显示设置对话框错误: {e}")
 
     def reload_config(self):
+        """设置保存后立即生效：刷新引擎、顶部信息卡与备份包列表。"""
         self.cfg = load_backup_config()
         self.engine = BackupEngine(self.cfg)
-        self.lbl_wb.setText(f"WorkBuddy数据: {self.engine.wb_dir}")
-        self.lbl_ws.setText(f"项目空间: {self.engine.ws_root}")
-        self.lbl_save.setText(f"默认保存: {self.engine.get_default_backup_folder()}")
+        self._sync_info_labels()
+        self.flash_status(f"设置已生效 · 备份将保存到 {self.engine.get_default_backup_folder()}")
         self.log(f"设置已更新，默认保存位置: {self.engine.get_default_backup_folder()}")
+        if self._current_page == 1:
+            self.refresh_zip_list()
 
     def log(self, msg):
         box = self._cur_log()
@@ -3170,9 +3593,19 @@ class TransparentMacWindow(QMainWindow):
         if ok:
             self.log(f"[完成] {msg}")
             AppDialog.show_success(self, "完成", msg)
+            # 任务结束后强制重绘，避免半透明弹窗关闭后主窗口留下残影
+            self.repaint()
+            QApplication.processEvents()
+            if self._current_page == 0:
+                self.load_local_sessions()      # 备份完成后刷新本机列表
+            else:
+                self.refresh_zip_list()         # 恢复完成后刷新备份包列表
+                self.load_local_sessions()      # 恢复的对话同步进备份页列表
+                self.flash_status("恢复完成，请重启 WorkBuddy 并登录同一账号")
         else:
             self.log(f"[失败] {msg}")
             AppDialog.show_error(self, "失败", msg)
+            self.repaint()
         self.worker = None
 
     def on_backup(self):
@@ -3300,7 +3733,7 @@ def install_chinese_translator(app: QApplication):
         except Exception:
             pass
     if not loaded:
-        logging.warning("未能加载 Qt 中文翻译文件，颜色对话框可能显示英文")
+        LOG.warning("未能加载 Qt 中文翻译文件，颜色对话框可能显示英文")
 
 
 class UpdateChecker(QThread):
@@ -3375,7 +3808,7 @@ def main():
             pass
         sys.exit(app.exec())
     except Exception as e:
-        logging.error(f"程序崩溃: {e}", exc_info=True)
+        LOG.error(f"程序崩溃: {e}", exc_info=True)
         AppDialog.show_error(None, "错误", f"程序发生错误：{e}")
         sys.exit(1)
 
