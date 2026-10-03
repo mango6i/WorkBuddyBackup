@@ -1431,52 +1431,8 @@ class BackupWorker(QThread):
 # ══════════════════════════════════════════════════════
 #  UI 组件
 # ══════════════════════════════════════════════════════
-class CustomToolTip(QWidget):
-    """自绘 tooltip：明确画白色圆角底 + 深色文字，避免系统主题给出黑色提示框。"""
-
-    def __init__(self, text, parent=None):
-        super().__init__(parent, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedHeight(26)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 4, 10, 4)
-        label = QLabel(text)
-        label.setStyleSheet("""
-            QLabel {
-                color: #334155;
-                font-size: 11px;
-                font-family: 'Microsoft YaHei';
-                background: transparent;
-            }
-        """)
-        layout.addWidget(label)
-        self.ensurePolished()
-        self.updateGeometry()
-        self.resize(self.sizeHint())
-        self.opacity = 0.0
-        self.setWindowOpacity(self.opacity)
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.fade_in)
-        self.timer.start(10)
-
-    def fade_in(self):
-        self.opacity += 0.1
-        if self.opacity >= 1.0:
-            self.opacity = 1.0
-            self.timer.stop()
-        self.setWindowOpacity(self.opacity)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(0, 0, self.width(), self.height(), 7, 7)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(255, 255, 255, 245)))
-        painter.drawPath(path)
-        painter.setPen(QColor(0, 0, 0, 40))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(0.5, 0.5, self.width() - 1, self.height() - 1, 7, 7)
+# 说明：原 CustomToolTip（自绘半透明气泡）在部分环境会让进程直接崩溃，
+# 已废弃，改为使用 Qt 原生 tooltip（全局 QSS 已设为白底黑字，不会出现黑色提示框）。
 
 
 class GradientFrame(QWidget):
@@ -1576,8 +1532,8 @@ class ControlButton(QPushButton):
     def __init__(self, icon, tooltip_text, parent=None, danger=False):
         super().__init__(icon, parent)
         self.tooltip_text = tooltip_text
-        self.tooltip = None
         self._danger = danger
+        self.setToolTip(tooltip_text)   # 原生 tooltip（全局样式为白底，安全且不崩溃）
         self.setFixedSize(34, 34)
         if danger:
             hover_bg = "background-color: #ff5f56; color: white;"
@@ -1597,23 +1553,8 @@ class ControlButton(QPushButton):
         """)
         self.setMouseTracking(True)
 
-    def enterEvent(self, event):
-        if not self.tooltip:
-            self.tooltip = CustomToolTip(self.tooltip_text)
-            btn_rect = self.rect()
-            btn_global_pos = self.mapToGlobal(btn_rect.center())
-            tooltip_x = btn_global_pos.x() - self.tooltip.width() // 2
-            tooltip_y = btn_global_pos.y() + btn_rect.height() // 2 + 5
-            self.tooltip.move(tooltip_x, tooltip_y)
-            self.tooltip.show()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        if self.tooltip:
-            self.tooltip.hide()
-            self.tooltip.deleteLater()
-            self.tooltip = None
-        super().leaveEvent(event)
+    # 不再自绘 tooltip：Qt 原生 tooltip + 全局白色样式即可，
+    # 自绘半透明气泡窗口会导致进程崩溃，这里彻底不再使用。
 
 
 class GradientDialog(QDialog):
@@ -2607,7 +2548,11 @@ class TransparentMacWindow(QMainWindow):
         self.dragging = False
         self.drag_start = QPoint()
         # 快捷键：Ctrl+, 打开设置
-        QShortcut(QKeySequence("Ctrl+,"), self, activated=self.show_settings)
+        self._shortcut_settings = QShortcut(
+            QKeySequence("Ctrl+,"), self, activated=self.show_settings)
+        # 调试开关：WB_AUTOTEST=1 时启动后自动打开设置（用于打包版自测）
+        if os.environ.get("WB_AUTOTEST"):
+            QTimer.singleShot(3000, self.show_settings)
 
     # ─────────── 通用小组件 ───────────
     def _info_card(self, caption, icon, value_label):
